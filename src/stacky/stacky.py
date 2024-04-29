@@ -32,7 +32,17 @@ import subprocess
 import sys
 import time
 from argparse import ArgumentParser
-from typing import Dict, FrozenSet, Generator, List, NewType, Optional, Tuple, TypedDict, Union
+from typing import (
+    Dict,
+    FrozenSet,
+    Generator,
+    List,
+    NewType,
+    Optional,
+    Tuple,
+    TypedDict,
+    Union,
+)
 
 import asciitree  # type: ignore
 import colors  # type: ignore
@@ -82,7 +92,9 @@ COLOR_STDOUT: bool = os.isatty(1)
 COLOR_STDERR: bool = os.isatty(2)
 IS_TERMINAL: bool = os.isatty(1) and os.isatty(2)
 CURRENT_BRANCH: BranchName
-STACK_BOTTOMS: FrozenSet[BranchName] = frozenset([BranchName("master"), BranchName("main")])
+STACK_BOTTOMS: FrozenSet[BranchName] = frozenset(
+    [BranchName("master"), BranchName("main")]
+)
 TOP_LEVEL_DIR: str
 
 STATE_FILE: str
@@ -109,18 +121,37 @@ class StackyConfig:
         rawconfig = configparser.ConfigParser()
         rawconfig.read(config_path)
         if rawconfig.has_section("UI"):
-            self.skip_confirm = bool(rawconfig.get("UI", "skip_confirm", fallback=self.skip_confirm))
-            self.change_to_main = bool(rawconfig.get("UI", "change_to_main", fallback=self.change_to_main))
-            self.change_to_adopted = bool(rawconfig.get("UI", "change_to_adopted", fallback=self.change_to_adopted))
-            self.share_ssh_session = bool(rawconfig.get("UI", "share_ssh_session", fallback=self.share_ssh_session))
+            self.skip_confirm = bool(
+                rawconfig.get("UI", "skip_confirm", fallback=self.skip_confirm)
+            )
+            self.change_to_main = bool(
+                rawconfig.get("UI", "change_to_main", fallback=self.change_to_main)
+            )
+            self.change_to_adopted = bool(
+                rawconfig.get(
+                    "UI", "change_to_adopted", fallback=self.change_to_adopted
+                )
+            )
+            self.share_ssh_session = bool(
+                rawconfig.get(
+                    "UI", "share_ssh_session", fallback=self.share_ssh_session
+                )
+            )
 
 
-CONFIG: StackyConfig
+def get_config() -> StackyConfig:
+    global CONFIG
+    if CONFIG is None:
+        CONFIG = read_config()
+    return CONFIG
 
 
 def read_config() -> StackyConfig:
     config = StackyConfig()
-    config_paths = [f"{TOP_LEVEL_DIR}/.stackyconfig", os.path.expanduser("~/.stackyconfig")]
+    config_paths = [
+        f"{TOP_LEVEL_DIR}/.stackyconfig",
+        os.path.expanduser("~/.stackyconfig"),
+    ]
 
     for p in config_paths:
         if os.path.exists(p):
@@ -129,7 +160,9 @@ def read_config() -> StackyConfig:
     return config
 
 
-def fmt(s: str, *args, color: bool = False, fg=None, bg=None, style=None, **kwargs) -> str:
+def fmt(
+    s: str, *args, color: bool = False, fg=None, bg=None, style=None, **kwargs
+) -> str:
     s = colors.color(s, fg=fg, bg=bg, style=style) if color else s
     return s.format(*args, **kwargs)
 
@@ -192,7 +225,9 @@ def _check_returncode(sp: subprocess.CompletedProcess, cmd: CmdArgs):
         die("Exited with status {}: {}. Stderr was:\n{}", rc, shlex.join(cmd), stderr)
 
 
-def run_multiline(cmd: CmdArgs, *, check: bool = True, null: bool = True, out: bool = False) -> Optional[str]:
+def run_multiline(
+    cmd: CmdArgs, *, check: bool = True, null: bool = True, out: bool = False
+) -> Optional[str]:
     debug("Running: {}", shlex.join(cmd))
     sys.stdout.flush()
     sys.stderr.flush()
@@ -236,7 +271,9 @@ def get_current_branch() -> Optional[BranchName]:
 
 
 def get_all_branches() -> List[BranchName]:
-    branches = run_multiline(CmdArgs(["git", "for-each-ref", "--format", "%(refname:short)", "refs/heads"]))
+    branches = run_multiline(
+        CmdArgs(["git", "for-each-ref", "--format", "%(refname:short)", "refs/heads"])
+    )
     assert branches is not None
     return [BranchName(b) for b in branches.split("\n") if b]
 
@@ -275,7 +312,9 @@ def get_stack_parent_commit(branch: BranchName) -> Optional[Commit]:  # type: ig
 
 
 def get_commit(branch: BranchName) -> Commit:  # type: ignore [return]
-    c = run_always_return(CmdArgs(["git", "rev-parse", "refs/heads/{}".format(branch)]), check=False)
+    c = run_always_return(
+        CmdArgs(["git", "rev-parse", "refs/heads/{}".format(branch)]), check=False
+    )
     return Commit(c)
 
 
@@ -312,7 +351,9 @@ def get_pr_info(branch: BranchName, *, full: bool = False) -> PRInfos:
     raw_infos: List[PRInfo] = data
 
     infos: Dict[str, PRInfo] = {info["id"]: info for info in raw_infos}
-    open_prs: List[PRInfo] = [info for info in infos.values() if info["state"] == "OPEN"]
+    open_prs: List[PRInfo] = [
+        info for info in infos.values() if info["state"] == "OPEN"
+    ]
     if len(open_prs) > 1:
         die(
             "Branch {} has more than one open PR: {}",
@@ -325,7 +366,9 @@ def get_pr_info(branch: BranchName, *, full: bool = False) -> PRInfos:
 # (remote, remote_branch, remote_branch_commit)
 def get_remote_info(branch: BranchName) -> Tuple[str, BranchName, Optional[Commit]]:
     if branch not in STACK_BOTTOMS:
-        remote = run(CmdArgs(["git", "config", "branch.{}.remote".format(branch)]), check=False)
+        remote = run(
+            CmdArgs(["git", "config", "branch.{}.remote".format(branch)]), check=False
+        )
         if remote != ".":
             die("Misconfigured branch {}: remote {}", branch, remote)
 
@@ -334,7 +377,9 @@ def get_remote_info(branch: BranchName) -> Tuple[str, BranchName, Optional[Commi
     remote_branch = branch
 
     remote_commit = run(
-        CmdArgs(["git", "rev-parse", "refs/remotes/{}/{}".format(remote, remote_branch)]),
+        CmdArgs(
+            ["git", "rev-parse", "refs/remotes/{}/{}".format(remote, remote_branch)]
+        ),
         check=False,
     )
 
@@ -375,7 +420,7 @@ class StackBranch:
     def load_pr_info(self):
         if not self._pr_info_loaded:
             self._pr_info_loaded = True
-            if not self.name in STACK_BOTTOMS:
+            if self.name not in STACK_BOTTOMS:
                 pr_infos = get_pr_info(self.name)
                 # FIXME maybe store the whole object and use it elsewhere
                 self.pr_info, self.open_pr_info = (
@@ -477,7 +522,9 @@ def make_tree_node(b: StackBranch) -> TreeNode:
 
 
 def make_subtree(b) -> BranchesTree:
-    return BranchesTree(dict(make_tree_node(c) for c in sorted(b.children, key=lambda x: x.name)))
+    return BranchesTree(
+        dict(make_tree_node(c) for c in sorted(b.children, key=lambda x: x.name))
+    )
 
 
 def make_tree(b: StackBranch) -> BranchesTree:
@@ -659,7 +706,12 @@ def cmd_branch_up(stack: StackBranchSet, args):
             len(b.children),
             fg="green",
         )
-        forest = BranchesTreeForest([BranchesTree({BranchName(c.name): (c, BranchesTree({}))}) for c in b.children])
+        forest = BranchesTreeForest(
+            [
+                BranchesTree({BranchName(c.name): (c, BranchesTree({}))})
+                for c in b.children
+            ]
+        )
         child = menu_choose_branch(forest).name
     else:
         child = next(iter(b.children)).name
@@ -683,7 +735,11 @@ def cmd_branch_new(stack: StackBranchSet, args):
     assert b.commit
     name = args.name
     create_branch(name)
-    run(CmdArgs(["git", "update-ref", "refs/stack-parent/{}".format(name), b.commit, ""]))
+    run(
+        CmdArgs(
+            ["git", "update-ref", "refs/stack-parent/{}".format(name), b.commit, ""]
+        )
+    )
 
 
 def cmd_branch_checkout(stack: StackBranchSet, args):
@@ -767,7 +823,7 @@ def find_issue_marker(name: str) -> Optional[str]:
         res = match.group(1)
         if "_" in res:
             return res.replace("_", "-")
-        if not "-" in res:
+        if "-" not in res:
             newmatch = re.match(r"(...)(\d+)", res)
             assert newmatch is not None
             return f"{newmatch.group(1)}-{newmatch.group(2)}"
@@ -821,7 +877,10 @@ def create_gh_pr(b: StackBranch, prefix: str):
                 title = out
 
         title = prompt(
-            (fmt("? ", color=COLOR_STDOUT, fg="green") + fmt("Title ", color=COLOR_STDOUT, style="bold", fg="white")),
+            (
+                fmt("? ", color=COLOR_STDOUT, fg="green")
+                + fmt("Title ", color=COLOR_STDOUT, style="bold", fg="white")
+            ),
             title,
         )
         cmd.extend(["--title", title.strip()])
@@ -916,13 +975,15 @@ def do_push(
     # Figure out if we need to add a prefix to the branch
     # ie. user:foo
     # We should call gh repo set-default before doing that
-    val = run(CmdArgs(["git", "config", f"remote.{remote_name}.gh-resolved"]), check=False)
+    val = run(
+        CmdArgs(["git", "config", f"remote.{remote_name}.gh-resolved"]), check=False
+    )
     if val is not None and "/" in val:
         # If there is a "/" in the gh-resolved it means that the repo where
         # the should be created is not the same as the one where the push will
         # be made, we need to add a prefix to the branch in the gh pr command
         val = run_always_return(CmdArgs(["git", "config", f"remote.{remote_name}.url"]))
-        prefix = f'{val.split(":")[1].split("/")[0]}:'
+        prefix = f"{val.split(':')[1].split('/')[0]}:"
     else:
         prefix = ""
     for b, push, pr_action in actions:
@@ -981,7 +1042,7 @@ def do_sync(forest: BranchesTreeForest):
         if not b.parent:
             cout("✓ Not syncing base branch {}\n", b.name, fg="green")
             continue
-        if b.is_synced_with_parent() and not b.parent in syncs_set:
+        if b.is_synced_with_parent() and b.parent not in syncs_set:
             cout(
                 "✓ Not syncing branch {}, already synced with parent {}\n",
                 b.name,
@@ -1003,7 +1064,9 @@ def do_sync(forest: BranchesTreeForest):
     inner_do_sync(syncs, sync_names)
 
 
-def set_parent_commit(branch: BranchName, new_commit: Commit, prev_commit: Optional[str] = None):
+def set_parent_commit(
+    branch: BranchName, new_commit: Commit, prev_commit: Optional[str] = None
+):
     cmd = [
         "git",
         "update-ref",
@@ -1043,7 +1106,9 @@ def inner_do_sync(syncs: List[StackBranch], sync_names: List[BranchName]):
         else:
             cout("Rebasing {} on top of {}\n", b.name, b.parent.name, fg="green")
             r = run(
-                CmdArgs(["git", "rebase", "--onto", b.parent.name, b.parent_commit, b.name]),
+                CmdArgs(
+                    ["git", "rebase", "--onto", b.parent.name, b.parent_commit, b.name]
+                ),
                 out=True,
                 check=False,
             )
@@ -1062,7 +1127,9 @@ def cmd_stack_sync(stack: StackBranchSet, args):
     do_sync(get_current_stack_as_forest(stack))
 
 
-def do_commit(stack: StackBranchSet, *, message=None, amend=False, allow_empty=False, edit=True):
+def do_commit(
+    stack: StackBranchSet, *, message=None, amend=False, allow_empty=False, edit=True
+):
     b = stack.stack[CURRENT_BRANCH]
     if not b.parent:
         die("Do not commit directly on {}", b.name)
@@ -1185,7 +1252,9 @@ def get_bottom_level_branches_as_forest(stack: StackBranchSet) -> BranchesTreeFo
                 {
                     bottom.name: (
                         bottom,
-                        BranchesTree({b.name: (b, BranchesTree({})) for b in bottom.children}),
+                        BranchesTree(
+                            {b.name: (b, BranchesTree({})) for b in bottom.children}
+                        ),
                     )
                 }
             )
@@ -1197,7 +1266,9 @@ def get_bottom_level_branches_as_forest(stack: StackBranchSet) -> BranchesTreeFo
 def get_remote_type(remote: str = "origin") -> Optional[str]:
     out = run_always_return(CmdArgs(["git", "remote", "-v"]))
     for l in out.split("\n"):
-        match = re.match(r"^{}\s+(?:ssh://)?([^/]*):(?!//).*\s+\(push\)$".format(remote), l)
+        match = re.match(
+            r"^{}\s+(?:ssh://)?([^/]*):(?!//).*\s+\(push\)$".format(remote), l
+        )
         if match:
             sshish_host = match.group(1)
             return sshish_host
@@ -1242,7 +1313,9 @@ def start_muxed_ssh(remote: str = "origin"):
                 error = p.stderr.read()
             else:
                 error = b"unknown"
-            die(f"Failed to start ssh muxed connection, error was: {error.decode('utf-8').strip()}")
+            die(
+                f"Failed to start ssh muxed connection, error was: {error.decode('utf-8').strip()}"
+            )
 
 
 def get_branches_to_delete(forest: BranchesTreeForest) -> List[StackBranch]:
@@ -1350,7 +1423,9 @@ def cmd_import(stack: StackBranchSet, args):
         if not open_pr["commits"]:
             die("PR #{} has no commits", open_pr["number"])
         first_commit = open_pr["commits"][0]["oid"]
-        parent_commit = Commit(run_always_return(CmdArgs(["git", "rev-parse", "{}^".format(first_commit)])))
+        parent_commit = Commit(
+            run_always_return(CmdArgs(["git", "rev-parse", "{}^".format(first_commit)]))
+        )
         next_branch = open_pr["baseRefName"]
         info(
             "Branch {}: PR #{}, parent is {} at commit {}",
@@ -1481,7 +1556,9 @@ def cmd_land(stack: StackBranchSet, args):
     v = run(CmdArgs(["git", "rev-parse", b.name]))
     assert v is not None
     head_commit = Commit(v)
-    cmd = CmdArgs(["gh", "pr", "merge", b.name, "--squash", "--match-head-commit", head_commit])
+    cmd = CmdArgs(
+        ["gh", "pr", "merge", b.name, "--squash", "--match-head-commit", head_commit]
+    )
     if args.auto:
         cmd.append("--auto")
     run(cmd, out=True)
@@ -1514,14 +1591,20 @@ def main():
         subparsers = parser.add_subparsers(required=True, dest="command")
 
         # continue
-        continue_parser = subparsers.add_parser("continue", help="Continue previously interrupted command")
+        continue_parser = subparsers.add_parser(
+            "continue", help="Continue previously interrupted command"
+        )
         continue_parser.set_defaults(func=None)
 
         # down
-        down_parser = subparsers.add_parser("down", help="Go down in the current stack (towards master/main)")
+        down_parser = subparsers.add_parser(
+            "down", help="Go down in the current stack (towards master/main)"
+        )
         down_parser.set_defaults(func=cmd_branch_down)
         # up
-        up_parser = subparsers.add_parser("up", help="Go up in the current stack (away master/main)")
+        up_parser = subparsers.add_parser(
+            "up", help="Go up in the current stack (away master/main)"
+        )
         up_parser.set_defaults(func=cmd_branch_up)
         # info
         info_parser = subparsers.add_parser("info", help="Stack info")
@@ -1531,43 +1614,73 @@ def main():
         # commit
         commit_parser = subparsers.add_parser("commit", help="Commit")
         commit_parser.add_argument("-m", help="Commit message", dest="message")
-        commit_parser.add_argument("--amend", action="store_true", help="Amend last commit")
-        commit_parser.add_argument("--allow-empty", action="store_true", help="Allow empty commit")
+        commit_parser.add_argument(
+            "--amend", action="store_true", help="Amend last commit"
+        )
+        commit_parser.add_argument(
+            "--allow-empty", action="store_true", help="Allow empty commit"
+        )
         commit_parser.add_argument("--no-edit", action="store_true", help="Skip editor")
         commit_parser.set_defaults(func=cmd_commit)
 
         # amend
-        amend_parser = subparsers.add_parser("amend", help="Shortcut for amending last commit")
+        amend_parser = subparsers.add_parser(
+            "amend", help="Shortcut for amending last commit"
+        )
         amend_parser.set_defaults(func=cmd_amend)
 
         # branch
-        branch_parser = subparsers.add_parser("branch", aliases=["b"], help="Operations on branches")
-        branch_subparsers = branch_parser.add_subparsers(required=True, dest="branch_command")
-        branch_up_parser = branch_subparsers.add_parser("up", aliases=["u"], help="Move upstack")
+        branch_parser = subparsers.add_parser(
+            "branch", aliases=["b"], help="Operations on branches"
+        )
+        branch_subparsers = branch_parser.add_subparsers(
+            required=True, dest="branch_command"
+        )
+        branch_up_parser = branch_subparsers.add_parser(
+            "up", aliases=["u"], help="Move upstack"
+        )
         branch_up_parser.set_defaults(func=cmd_branch_up)
 
-        branch_down_parser = branch_subparsers.add_parser("down", aliases=["d"], help="Move downstack")
+        branch_down_parser = branch_subparsers.add_parser(
+            "down", aliases=["d"], help="Move downstack"
+        )
         branch_down_parser.set_defaults(func=cmd_branch_down)
 
-        branch_new_parser = branch_subparsers.add_parser("new", aliases=["create"], help="Create a new branch")
+        branch_new_parser = branch_subparsers.add_parser(
+            "new", aliases=["create"], help="Create a new branch"
+        )
         branch_new_parser.add_argument("name", help="Branch name")
         branch_new_parser.set_defaults(func=cmd_branch_new)
 
-        branch_checkout_parser = branch_subparsers.add_parser("checkout", aliases=["co"], help="Checkout a branch")
+        branch_checkout_parser = branch_subparsers.add_parser(
+            "checkout", aliases=["co"], help="Checkout a branch"
+        )
         branch_checkout_parser.add_argument("name", help="Branch name", nargs="?")
         branch_checkout_parser.set_defaults(func=cmd_branch_checkout)
 
         # stack
-        stack_parser = subparsers.add_parser("stack", aliases=["s"], help="Operations on the full current stack")
-        stack_subparsers = stack_parser.add_subparsers(required=True, dest="stack_command")
+        stack_parser = subparsers.add_parser(
+            "stack", aliases=["s"], help="Operations on the full current stack"
+        )
+        stack_subparsers = stack_parser.add_subparsers(
+            required=True, dest="stack_command"
+        )
 
-        stack_info_parser = stack_subparsers.add_parser("info", aliases=["i"], help="Info for current stack")
-        stack_info_parser.add_argument("--pr", action="store_true", help="Get PR info (slow)")
+        stack_info_parser = stack_subparsers.add_parser(
+            "info", aliases=["i"], help="Info for current stack"
+        )
+        stack_info_parser.add_argument(
+            "--pr", action="store_true", help="Get PR info (slow)"
+        )
         stack_info_parser.set_defaults(func=cmd_stack_info)
 
         stack_push_parser = stack_subparsers.add_parser("push", help="Push")
-        stack_push_parser.add_argument("--force", "-f", action="store_true", help="Bypass confirmation")
-        stack_push_parser.add_argument("--no-pr", dest="pr", action="store_false", help="Skip Create PRs")
+        stack_push_parser.add_argument(
+            "--force", "-f", action="store_true", help="Bypass confirmation"
+        )
+        stack_push_parser.add_argument(
+            "--no-pr", dest="pr", action="store_false", help="Skip Create PRs"
+        )
         stack_push_parser.set_defaults(func=cmd_stack_push)
 
         stack_sync_parser = stack_subparsers.add_parser("sync", help="Sync")
@@ -1579,22 +1692,36 @@ def main():
         stack_checkout_parser.set_defaults(func=cmd_stack_checkout)
 
         # upstack
-        upstack_parser = subparsers.add_parser("upstack", aliases=["us"], help="Operations on the current upstack")
-        upstack_subparsers = upstack_parser.add_subparsers(required=True, dest="upstack_command")
+        upstack_parser = subparsers.add_parser(
+            "upstack", aliases=["us"], help="Operations on the current upstack"
+        )
+        upstack_subparsers = upstack_parser.add_subparsers(
+            required=True, dest="upstack_command"
+        )
 
-        upstack_info_parser = upstack_subparsers.add_parser("info", aliases=["i"], help="Info for current upstack")
-        upstack_info_parser.add_argument("--pr", action="store_true", help="Get PR info (slow)")
+        upstack_info_parser = upstack_subparsers.add_parser(
+            "info", aliases=["i"], help="Info for current upstack"
+        )
+        upstack_info_parser.add_argument(
+            "--pr", action="store_true", help="Get PR info (slow)"
+        )
         upstack_info_parser.set_defaults(func=cmd_upstack_info)
 
         upstack_push_parser = upstack_subparsers.add_parser("push", help="Push")
-        upstack_push_parser.add_argument("--force", "-f", action="store_true", help="Bypass confirmation")
-        upstack_push_parser.add_argument("--no-pr", dest="pr", action="store_false", help="Skip Create PRs")
+        upstack_push_parser.add_argument(
+            "--force", "-f", action="store_true", help="Bypass confirmation"
+        )
+        upstack_push_parser.add_argument(
+            "--no-pr", dest="pr", action="store_false", help="Skip Create PRs"
+        )
         upstack_push_parser.set_defaults(func=cmd_upstack_push)
 
         upstack_sync_parser = upstack_subparsers.add_parser("sync", help="Sync")
         upstack_sync_parser.set_defaults(func=cmd_upstack_sync)
 
-        upstack_onto_parser = upstack_subparsers.add_parser("onto", aliases=["restack"], help="Restack")
+        upstack_onto_parser = upstack_subparsers.add_parser(
+            "onto", aliases=["restack"], help="Restack"
+        )
         upstack_onto_parser.add_argument("target", help="New parent")
         upstack_onto_parser.set_defaults(func=cmd_upstack_onto)
 
@@ -1602,17 +1729,25 @@ def main():
         downstack_parser = subparsers.add_parser(
             "downstack", aliases=["ds"], help="Operations on the current downstack"
         )
-        downstack_subparsers = downstack_parser.add_subparsers(required=True, dest="downstack_command")
+        downstack_subparsers = downstack_parser.add_subparsers(
+            required=True, dest="downstack_command"
+        )
 
         downstack_info_parser = downstack_subparsers.add_parser(
             "info", aliases=["i"], help="Info for current downstack"
         )
-        downstack_info_parser.add_argument("--pr", action="store_true", help="Get PR info (slow)")
+        downstack_info_parser.add_argument(
+            "--pr", action="store_true", help="Get PR info (slow)"
+        )
         downstack_info_parser.set_defaults(func=cmd_downstack_info)
 
         downstack_push_parser = downstack_subparsers.add_parser("push", help="Push")
-        downstack_push_parser.add_argument("--force", "-f", action="store_true", help="Bypass confirmation")
-        downstack_push_parser.add_argument("--no-pr", dest="pr", action="store_false", help="Skip Create PRs")
+        downstack_push_parser.add_argument(
+            "--force", "-f", action="store_true", help="Bypass confirmation"
+        )
+        downstack_push_parser.add_argument(
+            "--no-pr", dest="pr", action="store_false", help="Skip Create PRs"
+        )
         downstack_push_parser.set_defaults(func=cmd_downstack_push)
 
         downstack_sync_parser = downstack_subparsers.add_parser("sync", help="Sync")
@@ -1620,12 +1755,16 @@ def main():
 
         # update
         update_parser = subparsers.add_parser("update", help="Update repo")
-        update_parser.add_argument("--force", "-f", action="store_true", help="Bypass confirmation")
+        update_parser.add_argument(
+            "--force", "-f", action="store_true", help="Bypass confirmation"
+        )
         update_parser.set_defaults(func=cmd_update)
 
         # import
         import_parser = subparsers.add_parser("import", help="Import Graphite stack")
-        import_parser.add_argument("--force", "-f", action="store_true", help="Bypass confirmation")
+        import_parser.add_argument(
+            "--force", "-f", action="store_true", help="Bypass confirmation"
+        )
         import_parser.add_argument("name", help="Foreign stack top")
         import_parser.set_defaults(func=cmd_import)
 
@@ -1635,8 +1774,12 @@ def main():
         adopt_parser.set_defaults(func=cmd_adopt)
 
         # land
-        land_parser = subparsers.add_parser("land", help="Land bottom-most PR on current stack")
-        land_parser.add_argument("--force", "-f", action="store_true", help="Bypass confirmation")
+        land_parser = subparsers.add_parser(
+            "land", help="Land bottom-most PR on current stack"
+        )
+        land_parser.add_argument(
+            "--force", "-f", action="store_true", help="Bypass confirmation"
+        )
         land_parser.add_argument(
             "--auto",
             "-a",
@@ -1647,28 +1790,40 @@ def main():
 
         # shortcuts
         push_parser = subparsers.add_parser("push", help="Alias for downstack push")
-        push_parser.add_argument("--force", "-f", action="store_true", help="Bypass confirmation")
-        push_parser.add_argument("--no-pr", dest="pr", action="store_false", help="Skip Create PRs")
+        push_parser.add_argument(
+            "--force", "-f", action="store_true", help="Bypass confirmation"
+        )
+        push_parser.add_argument(
+            "--no-pr", dest="pr", action="store_false", help="Skip Create PRs"
+        )
         push_parser.set_defaults(func=cmd_downstack_push)
 
         sync_parser = subparsers.add_parser("sync", help="Alias for stack sync")
         sync_parser.set_defaults(func=cmd_stack_sync)
 
-        checkout_parser = subparsers.add_parser("checkout", aliases=["co"], help="Checkout a branch")
+        checkout_parser = subparsers.add_parser(
+            "checkout", aliases=["co"], help="Checkout a branch"
+        )
         checkout_parser.add_argument("name", help="Branch name", nargs="?")
         checkout_parser.set_defaults(func=cmd_branch_checkout)
 
-        checkout_parser = subparsers.add_parser("sco", help="Checkout a branch in this stack")
+        checkout_parser = subparsers.add_parser(
+            "sco", help="Checkout a branch in this stack"
+        )
         checkout_parser.set_defaults(func=cmd_stack_checkout)
 
         args = parser.parse_args()
-        logging.basicConfig(format=_LOGGING_FORMAT, level=LOGLEVELS[args.log_level], force=True)
+        logging.basicConfig(
+            format=_LOGGING_FORMAT, level=LOGLEVELS[args.log_level], force=True
+        )
 
         p = run_always_return(CmdArgs(["git", "rev-parse", "--show-toplevel"]))
         global TOP_LEVEL_DIR
         TOP_LEVEL_DIR = os.path.realpath(p)
 
-        mangled_state_prefix = TOP_LEVEL_DIR.replace("_", "_U").replace("~", "_T").replace("/", "_S")
+        mangled_state_prefix = (
+            TOP_LEVEL_DIR.replace("_", "_U").replace("~", "_T").replace("/", "_S")
+        )
         global STATE_FILE
         STATE_FILE = os.path.expanduser(f"~/.stacky.state.{mangled_state_prefix}")
 
