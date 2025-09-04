@@ -13,7 +13,7 @@ jobs:
     name: bazel build linux
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
           go-version: '>=1.20.0'
@@ -40,7 +40,7 @@ jobs:
     name: build and archive
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-python@v5.0.0
         with:
           python-version: '3.10'
@@ -65,7 +65,7 @@ jobs:
     name: runner / black formatter
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: psf/black@stable
         with:
           options: "--check --verbose"
@@ -75,7 +75,7 @@ jobs:
     name: run unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-python@v5.0.0
         with:
           python-version: '3.10'
@@ -86,7 +86,7 @@ jobs:
     name: static type check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-python@v5.0.0
         with:
           python-version: '3.10'
