@@ -15,9 +15,12 @@
 # to the commit at the tip of the parent branch, as `git update-ref
 # refs/stack-parent/<name>`.
 #
+# For all bottom branches we maintain a ref, labeling it a bottom_branch refs/stacky-bottom-branch/branch-name
+#
 # When rebasing or restacking, we proceed in depth-first order (from "master"
 # onwards). After updating a parent branch P, given a child branch C,
 # we rebase everything from C's PC until C's tip onto P.
+#
 #
 # That's all there is to it.
 
@@ -82,7 +85,8 @@ COLOR_STDOUT: bool = os.isatty(1)
 COLOR_STDERR: bool = os.isatty(2)
 IS_TERMINAL: bool = os.isatty(1) and os.isatty(2)
 CURRENT_BRANCH: BranchName
-STACK_BOTTOMS: FrozenSet[BranchName] = frozenset([BranchName("master"), BranchName("main")])
+STACK_BOTTOMS: set[BranchName] = set([BranchName("master"), BranchName("main")])
+FROZEN_STACK_BOTTOMS: FrozenSet[BranchName] = frozenset([BranchName("master"), BranchName("main")])
 STATE_FILE = os.path.expanduser("~/.stacky.state")
 TMP_STATE_FILE = STATE_FILE + ".tmp"
 
@@ -102,6 +106,8 @@ class StackyConfig:
     change_to_main: bool = False
     change_to_adopted: bool = False
     share_ssh_session: bool = False
+    use_merge: bool = False
+    use_force_push: bool = True
 
     def read_one_config(self, config_path: str):
         rawconfig = configparser.ConfigParser()
@@ -112,8 +118,19 @@ class StackyConfig:
             self.change_to_adopted = bool(rawconfig.get("UI", "change_to_adopted", fallback=self.change_to_adopted))
             self.share_ssh_session = bool(rawconfig.get("UI", "share_ssh_session", fallback=self.share_ssh_session))
 
+        if rawconfig.has_section("GIT"):
+            self.use_merge = bool(rawconfig.get("GIT", "use_merge", fallback=self.use_merge))
+            self.use_merge = bool(rawconfig.get("GIT", "use_force_push", fallback=self.use_force_push))
 
-CONFIG: StackyConfig
+
+CONFIG: Optional[StackyConfig] = None
+
+
+def get_config() -> StackyConfig:
+    global CONFIG
+    if CONFIG is None:
+        CONFIG = read_config()
+    return CONFIG
 
 
 def read_config() -> StackyConfig:
@@ -163,7 +180,7 @@ class ExitException(BaseException):
 
 
 def stop_muxed_ssh(remote: str = "origin"):
-    if CONFIG.share_ssh_session:
+    if get_config().share_ssh_session:
         hostish = get_remote_type(remote)
         if hostish is not None:
             cmd = gen_ssh_mux_cmd()
@@ -260,6 +277,8 @@ def get_stack_parent_branch(branch: BranchName) -> Optional[BranchName]:  # type
     p = run(CmdArgs(["git", "config", "branch.{}.merge".format(branch)]), check=False)
     if p is not None:
         p = remove_prefix(p, "refs/heads/")
+        if BranchName(p) == branch:
+            return None
         return BranchName(p)
 
 
@@ -415,6 +434,29 @@ class StackBranchSet:
             self.tops.add(s)
         return s
 
+    def addStackBranch(self, s: StackBranch):
+        if s.name not in self.stack:
+            self.stack[s.name] = s
+            if s.parent is None:
+                self.bottoms.add(s)
+            if len(s.children) == 0:
+                self.tops.add(s)
+
+        return s
+
+    def remove(self, name: BranchName) -> Optional[StackBranch]:
+        if name in self.stack:
+            s = self.stack[name]
+            assert s.name == name
+            del self.stack[name]
+            if s in self.tops:
+                self.tops.remove(s)
+            if s in self.bottoms:
+                self.bottoms.remove(s)
+            return s
+
+        return None
+
     def __repr__(self) -> str:
         out = f"StackBranchSet: {self.stack}"
         return out
@@ -458,8 +500,40 @@ def load_stack_for_given_branch(
     return top, [b.branch for b in branches]
 
 
+def get_branch_name_from_short_ref(ref: str) -> BranchName:
+    parts = ref.split("/", 1)
+    if len(parts) != 2:
+        die("invalid ref: {}".format(ref))
+
+    return BranchName(parts[1])
+
+
+def get_all_stack_bottoms() -> List[BranchName]:
+    branches = run_multiline(
+        CmdArgs(["git", "for-each-ref", "--format", "%(refname:short)", "refs/stacky-bottom-branch"])
+    )
+    if branches:
+        return [get_branch_name_from_short_ref(b) for b in branches.split("\n") if b]
+    return []
+
+
+def get_all_stack_parent_refs() -> List[BranchName]:
+    branches = run_multiline(CmdArgs(["git", "for-each-ref", "--format", "%(refname:short)", "refs/stack-parent"]))
+    if branches:
+        return [get_branch_name_from_short_ref(b) for b in branches.split("\n") if b]
+    return []
+
+
+def load_all_stack_bottoms():
+    branches = run_multiline(
+        CmdArgs(["git", "for-each-ref", "--format", "%(refname:short)", "refs/stacky-bottom-branch"])
+    )
+    STACK_BOTTOMS.update(get_all_stack_bottoms())
+
+
 def load_all_stacks(stack: StackBranchSet) -> Optional[StackBranch]:
     """Given a stack return the top of it, aka the bottom of the tree"""
+    load_all_stack_bottoms()
     all_branches = set(get_all_branches())
     current_branch_top = None
     while all_branches:
@@ -727,7 +801,7 @@ def prompt(message: str, default_value: Optional[str]) -> str:
 
 
 def confirm(msg: str = "Proceed?"):
-    if CONFIG.skip_confirm:
+    if get_config().skip_confirm:
         return
     if not os.isatty(0):
         die("Standard input is not a terminal, use --force option to force action")
@@ -784,7 +858,9 @@ def create_gh_pr(b: StackBranch, prefix: str):
     cout("Creating PR for {}\n", b.name, fg="green")
     parent_prefix = ""
     if b.parent.name not in STACK_BOTTOMS:
-        parent_prefix = prefix
+        # you are pushing a sub stack, there is no way we can make it work
+        # accross repo so we will push within your own clone
+        prefix = ""
     cmd = [
         "gh",
         "pr",
@@ -850,7 +926,6 @@ def do_push(
     pr: bool = False,
     remote_name: str = "origin",
 ):
-    start_muxed_ssh(remote_name)
     if pr:
         load_pr_info_for_forest(forest)
     print_forest(forest)
@@ -929,15 +1004,22 @@ def do_push(
         prefix = f'{val.split(":")[1].split("/")[0]}:'
     else:
         prefix = ""
+    muxed = False
     for b, push, pr_action in actions:
         if push:
+            if not muxed:
+                start_muxed_ssh(remote_name)
+                muxed = True
+            # Try to run pre-push before muxing ...
+            # To do so we need to pickup the current commit of the branch, the branch name, the
+            # parent branch and it's parent commit and call .git/hooks/pre-push
             cout("Pushing {}\n", b.name, fg="green")
             run(
                 CmdArgs(
                     [
                         "git",
                         "push",
-                        "-f",
+                        "-f" if get_config().use_force_push else "",
                         b.remote,
                         "{}:{}".format(b.name, b.remote_branch),
                     ]
@@ -1027,6 +1109,7 @@ def get_commits_between(a: Commit, b: Commit):
 
 def inner_do_sync(syncs: List[StackBranch], sync_names: List[BranchName]):
     print()
+    sync_type = "merge" if get_config().use_merge else "rebase"
     while syncs:
         with open(TMP_STATE_FILE, "w") as f:
             json.dump({"branch": CURRENT_BRANCH, "sync": sync_names}, f)
@@ -1039,22 +1122,36 @@ def inner_do_sync(syncs: List[StackBranch], sync_names: List[BranchName]):
             continue
         if b.parent.commit in get_commits_between(b.parent_commit, b.commit):
             cout(
-                "Recording complete rebase of {} on top of {}\n",
+                "Recording complete {} of {} on top of {}\n",
+                sync_type,
                 b.name,
                 b.parent.name,
                 fg="green",
             )
         else:
-            cout("Rebasing {} on top of {}\n", b.name, b.parent.name, fg="green")
-            r = run(
-                CmdArgs(["git", "rebase", "--onto", b.parent.name, b.parent_commit, b.name]),
-                out=True,
-                check=False,
-            )
+            r = None
+            if get_config().use_merge:
+                cout("Merging {} into {}\n", b.parent.name, b.name, fg="green")
+                run(CmdArgs(["git", "checkout", str(b.name)]))
+                r = run(
+                    CmdArgs(["git", "merge", b.parent.name]),
+                    out=True,
+                    check=False,
+                )
+            else:
+                cout("Rebasing {} on top of {}\n", b.name, b.parent.name, fg="green")
+                r = run(
+                    CmdArgs(["git", "rebase", "--onto", b.parent.name, b.parent_commit, b.name]),
+                    out=True,
+                    check=False,
+                )
+
             if r is None:
                 print()
                 die(
-                    "Automatic rebase failed. Please complete the rebase (fix conflicts; `git rebase --continue`), then run `stacky continue`"
+                    "Automatic {0} failed. Please complete the {0} (fix conflicts; `git {0} --continue`), then run `stacky continue`".format(
+                        sync_type
+                    )
                 )
             b.commit = get_commit(b.name)
         set_parent_commit(b.name, b.parent.commit, b.parent_commit)
@@ -1076,6 +1173,10 @@ def do_commit(stack: StackBranchSet, *, message=None, amend=False, allow_empty=F
             b.name,
             b.parent.name,
         )
+
+    if amend and (get_config().use_merge or not get_config().use_force_push):
+        die("Amending is not allowed if using git merge or if force pushing is disallowed")
+
     if amend and b.commit == b.parent.commit:
         die("Branch {} has no commits, may not amend", b.name)
 
@@ -1131,26 +1232,39 @@ def cmd_upstack_sync(stack: StackBranchSet, args):
     do_sync(get_current_upstack_as_forest(stack))
 
 
-def set_parent(branch: BranchName, target: BranchName, *, set_origin: bool = False):
+def set_parent(branch: BranchName, target: Optional[BranchName], *, set_origin: bool = False):
     if set_origin:
         run(CmdArgs(["git", "config", "branch.{}.remote".format(branch), "."]))
 
+    ## If target is none this becomes a new stack bottom
     run(
         CmdArgs(
             [
                 "git",
                 "config",
                 "branch.{}.merge".format(branch),
-                "refs/heads/{}".format(target),
+                "refs/heads/{}".format(target if target is not None else branch),
             ]
         )
     )
+
+    if target is None:
+        run(
+            CmdArgs(
+                [
+                    "git",
+                    "update-ref",
+                    "-d",
+                    "refs/stack-parent/{}".format(branch),
+                ]
+            )
+        )
 
 
 def cmd_upstack_onto(stack: StackBranchSet, args):
     b = stack.stack[CURRENT_BRANCH]
     if not b.parent:
-        die("May not restack {}", b.name)
+        die("may not upstack a stack bottom, use stacky adopt")
     target = stack.stack[args.target]
     upstack = get_current_upstack_as_forest(stack)
     for ub in forest_depth_first(upstack):
@@ -1160,6 +1274,27 @@ def cmd_upstack_onto(stack: StackBranchSet, args):
     set_parent(b.name, target.name)
 
     do_sync(upstack)
+
+
+def cmd_upstack_as_base(stack: StackBranchSet):
+    b = stack.stack[CURRENT_BRANCH]
+    if not b.parent:
+        die("Branch {} is already a stack bottom", b.name)
+
+    b.parent = None  # type: ignore
+    stack.remove(b.name)
+    stack.addStackBranch(b)
+    set_parent(b.name, None)
+
+    run(CmdArgs(["git", "update-ref", "refs/stacky-bottom-branch/{}".format(b.name), b.commit, ""]))
+    info("Set {} as new bottom branch".format(b.name))
+
+
+def cmd_upstack_as(stack: StackBranchSet, args):
+    if args.target == "bottom":
+        cmd_upstack_as_base(stack)
+    else:
+        die("Invalid target {}, acceptable targets are [base]", args.target)
 
 
 def cmd_downstack_info(stack, args):
@@ -1224,7 +1359,7 @@ def gen_ssh_mux_cmd() -> List[str]:
 
 
 def start_muxed_ssh(remote: str = "origin"):
-    if not CONFIG.share_ssh_session:
+    if not get_config().share_ssh_session:
         return
     hostish = get_remote_type(remote)
     if hostish is not None:
@@ -1291,6 +1426,25 @@ def delete_branches(stack: StackBranchSet, deletes: List[StackBranch]):
         run(CmdArgs(["git", "branch", "-D", b.name]))
 
 
+def cleanup_unused_refs(stack: StackBranchSet):
+    # Clean up stacky bottom branch refs
+    info("Cleaning up unused refs")
+    stack_bottoms = get_all_stack_bottoms()
+    for bottom in stack_bottoms:
+        if not bottom in stack.stack:
+            ref = "refs/stacky-bottom-branch/{}".format(bottom)
+            info("Deleting ref {}".format(ref))
+            run(CmdArgs(["git", "update-ref", "-d", ref]))
+
+    stack_parent_refs = get_all_stack_parent_refs()
+    for br in stack_parent_refs:
+        if br not in stack.stack:
+            ref = "refs/stack-parent/{}".format(br)
+            old_value = run(CmdArgs(["git", "show-ref", ref]))
+            info("Deleting ref {}".format(old_value))
+            run(CmdArgs(["git", "update-ref", "-d", ref]))
+
+
 def cmd_update(stack: StackBranchSet, args):
     remote = "origin"
     start_muxed_ssh(remote)
@@ -1328,6 +1482,8 @@ def cmd_update(stack: StackBranchSet, args):
 
     delete_branches(stack, deletes)
     stop_muxed_ssh(remote)
+
+    cleanup_unused_refs(stack)
 
 
 def cmd_import(stack: StackBranchSet, args):
@@ -1403,11 +1559,15 @@ def cmd_adopt(stack: StackBranch, args):
     """
     branch = args.name
     global CURRENT_BRANCH
+
+    if branch == CURRENT_BRANCH:
+        die("A branch cannot adopt itself")
+
     if CURRENT_BRANCH not in STACK_BOTTOMS:
         # TODO remove that, the initialisation code is already dealing with that in fact
         main_branch = get_real_stack_bottom()
 
-        if CONFIG.change_to_main and main_branch is not None:
+        if get_config().change_to_main and main_branch is not None:
             run(CmdArgs(["git", "checkout", main_branch]))
             CURRENT_BRANCH = main_branch
         else:
@@ -1416,10 +1576,16 @@ def cmd_adopt(stack: StackBranch, args):
                 CURRENT_BRANCH,
                 ", ".join(sorted(STACK_BOTTOMS)),
             )
+    if branch in STACK_BOTTOMS:
+        if branch in FROZEN_STACK_BOTTOMS:
+            die("Cannot adopt frozen stack bottoms {}".format(FROZEN_STACK_BOTTOMS))
+        # Remove the ref that this is a stack bottom
+        run(CmdArgs(["git", "update-ref", "-d", "refs/stacky-bottom-branch/{}".format(branch)]))
+
     parent_commit = get_merge_base(CURRENT_BRANCH, branch)
     set_parent(branch, CURRENT_BRANCH, set_origin=True)
     set_parent_commit(branch, parent_commit)
-    if CONFIG.change_to_adopted:
+    if get_config().change_to_adopted:
         run(CmdArgs(["git", "checkout", branch]))
 
 
@@ -1602,6 +1768,10 @@ def main():
         upstack_onto_parser.add_argument("target", help="New parent")
         upstack_onto_parser.set_defaults(func=cmd_upstack_onto)
 
+        upstack_as_parser = upstack_subparsers.add_parser("as", help="Upstack branch this as a new stack bottom")
+        upstack_as_parser.add_argument("target", help="bottom, restack this branch as a new stack bottom")
+        upstack_as_parser.set_defaults(func=cmd_upstack_as)
+
         # downstack
         downstack_parser = subparsers.add_parser(
             "downstack", aliases=["ds"], help="Operations on the current downstack"
@@ -1623,7 +1793,7 @@ def main():
         downstack_sync_parser.set_defaults(func=cmd_downstack_sync)
 
         # update
-        update_parser = subparsers.add_parser("update", help="Update repo")
+        update_parser = subparsers.add_parser("update", help="Update repo, all bottom branches must exist in remote")
         update_parser.add_argument("--force", "-f", action="store_true", help="Bypass confirmation")
         update_parser.set_defaults(func=cmd_update)
 
@@ -1665,9 +1835,6 @@ def main():
         checkout_parser = subparsers.add_parser("sco", help="Checkout a branch in this stack")
         checkout_parser.set_defaults(func=cmd_stack_checkout)
 
-        global CONFIG
-        CONFIG = read_config()
-
         args = parser.parse_args()
         logging.basicConfig(format=_LOGGING_FORMAT, level=LOGLEVELS[args.log_level], force=True)
 
@@ -1708,7 +1875,7 @@ def main():
             if CURRENT_BRANCH not in stack.stack:
                 main_branch = get_real_stack_bottom()
 
-                if CONFIG.change_to_main and main_branch is not None:
+                if get_config().change_to_main and main_branch is not None:
                     run(["git", "checkout", main_branch])
                     CURRENT_BRANCH = main_branch
                 else:

@@ -5,3 +5,5 @@ build/
 src/stacky/__pycache__
 
 bazel-*
+.mypy_cache
+.coverage
