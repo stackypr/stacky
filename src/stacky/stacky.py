@@ -379,12 +379,13 @@ class StackBranch:
     def load_pr_info(self):
         if not self._pr_info_loaded:
             self._pr_info_loaded = True
-            pr_infos = get_pr_info(self.name)
-            # FIXME maybe store the whole object and use it elsewhere
-            self.pr_info, self.open_pr_info = (
-                pr_infos.all,
-                pr_infos.open,
-            )
+            if not self.name in STACK_BOTTOMS:
+                pr_infos = get_pr_info(self.name)
+                # FIXME maybe store the whole object and use it elsewhere
+                self.pr_info, self.open_pr_info = (
+                    pr_infos.all,
+                    pr_infos.open,
+                )
 
 
 class StackBranchSet:
