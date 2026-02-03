@@ -75,7 +75,13 @@ jobs:
       - run: pip install xar
       - run: sudo apt-get install squashfs-tools
       - id: bazel_build
-        run: echo "DISABLED bazel build //:stacky.xar && bazel build //:stacky --build_python_zip"
+        run: bazel build //:stacky --build_python_zip
+      - name: Persist build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: stacky_bazel
+          path: |
+            bazel-bin/stacky
 
   github_release:
     name: >-
