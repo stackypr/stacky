@@ -1,11 +1,5 @@
-load("@rules_xar//:xarify.bzl", "py_binary_xar")
 load("@rules_python//python/pip_install:requirements.bzl", "compile_pip_requirements")
 load("@pypi//:requirements.bzl", "requirement")
-
-py_binary_xar(
-    name = "stacky.xar",
-    main = ":stacky",
-)
 
 
 py_binary(
@@ -25,5 +19,6 @@ exports_files(["requirements.txt"])
 # bazel run //:requirements.update
 compile_pip_requirements(
     name = "requirements",
+    src = "requirements.in",
     requirements_txt = "requirements_lock.txt",
 )

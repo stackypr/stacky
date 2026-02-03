@@ -23,10 +23,17 @@ jobs:
       - run: curl -L -o bazelisk https://github.com/bazelbuild/bazelisk/releases/download/v1.19.0/bazelisk-linux-amd64
       - run: chmod a+x bazelisk
       - run: ln -s bazelisk bazel
-      - run: pip install xar
       - run: sudo apt-get install squashfs-tools
       - id: bazel_build
-        run: echo "DISABLED bazel build //:stacky.xar && bazel build //:stacky --build_python_zip"
+        run: bazel build //:stacky --build_python_zip
+      - name: Persist build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: stacky_draft
+          path: |
+            bazel-bin/stacky
+          retention-days: 2
+
 
   ci:
     name: build and archive
