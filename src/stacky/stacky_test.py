@@ -3,7 +3,7 @@ import unittest
 from unittest import mock
 from unittest.mock import MagicMock
 
-from stacky import PRInfos, find_issue_marker, get_top_level_dir, read_config
+from stacky import PRInfos, find_issue_marker, read_config
 
 
 class TestStringMethods(unittest.TestCase):
