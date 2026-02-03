@@ -83,8 +83,10 @@ COLOR_STDERR: bool = os.isatty(2)
 IS_TERMINAL: bool = os.isatty(1) and os.isatty(2)
 CURRENT_BRANCH: BranchName
 STACK_BOTTOMS: FrozenSet[BranchName] = frozenset([BranchName("master"), BranchName("main")])
-STATE_FILE = os.path.expanduser("~/.stacky.state")
-TMP_STATE_FILE = STATE_FILE + ".tmp"
+TOP_LEVEL_DIR: str
+
+STATE_FILE: str
+TMP_STATE_FILE: str
 
 LOGLEVELS = {
     "critical": logging.CRITICAL,
@@ -117,9 +119,8 @@ CONFIG: StackyConfig
 
 
 def read_config() -> StackyConfig:
-    root_dir = get_top_level_dir()
     config = StackyConfig()
-    config_paths = [f"{root_dir}/.stackyconfig", os.path.expanduser("~/.stackyconfig")]
+    config_paths = [f"{TOP_LEVEL_DIR}/.stackyconfig", os.path.expanduser("~/.stackyconfig")]
 
     for p in config_paths:
         if os.path.exists(p):
@@ -261,11 +262,6 @@ def get_stack_parent_branch(branch: BranchName) -> Optional[BranchName]:  # type
     if p is not None:
         p = remove_prefix(p, "refs/heads/")
         return BranchName(p)
-
-
-def get_top_level_dir() -> PathName:
-    p = run_always_return(CmdArgs(["git", "rev-parse", "--show-toplevel"]))
-    return PathName(p)
 
 
 def get_stack_parent_commit(branch: BranchName) -> Optional[Commit]:  # type: ignore [return]
@@ -1665,11 +1661,24 @@ def main():
         checkout_parser = subparsers.add_parser("sco", help="Checkout a branch in this stack")
         checkout_parser.set_defaults(func=cmd_stack_checkout)
 
-        global CONFIG
-        CONFIG = read_config()
-
         args = parser.parse_args()
         logging.basicConfig(format=_LOGGING_FORMAT, level=LOGLEVELS[args.log_level], force=True)
+
+        p = run_always_return(CmdArgs(["git", "rev-parse", "--show-toplevel"]))
+        global TOP_LEVEL_DIR
+        TOP_LEVEL_DIR = os.path.realpath(p)
+
+        mangled_state_prefix = TOP_LEVEL_DIR.replace("_", "_U").replace("~", "_T").replace("/", "_S")
+        global STATE_FILE
+        STATE_FILE = os.path.expanduser(f"~/.stacky.state.{mangled_state_prefix}")
+
+        global TMP_STATE_FILE
+        TMP_STATE_FILE = STATE_FILE + ".tmp"
+
+        # Use a separate state file per repo
+
+        global CONFIG
+        CONFIG = read_config()
 
         global COLOR_STDERR
         global COLOR_STDOUT
