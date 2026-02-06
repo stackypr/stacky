@@ -155,7 +155,7 @@ def fmt(s: str, *args, color: bool = False, fg=None, bg=None, style=None, **kwar
 
 
 def cout(*args, **kwargs):
-    return sys.stdout.write(fmt(*args, color=COLOR_STDOUT, **kwargs))
+    return sys.stderr.write(fmt(*args, color=COLOR_STDOUT, **kwargs))
 
 
 def _log(fn, *args, **kwargs):
@@ -552,13 +552,13 @@ def print_tree(tree: BranchesTree):
     global ASCII_TREE
     s = ASCII_TREE(format_tree(tree, colorize=COLOR_STDOUT))
     lines = s.split("\n")
-    print("\n".join(reversed(lines)))
+    print("\n".join(reversed(lines)), file=sys.stderr)
 
 
 def print_forest(trees: List[BranchesTree]):
     for i, t in enumerate(trees):
         if i != 0:
-            print()
+            print(file=sys.stderr)
         print_tree(t)
 
 
@@ -749,7 +749,7 @@ def confirm(msg: str = "Proceed?"):
         return
     if not os.isatty(0):
         die("Standard input is not a terminal, use --force option to force action")
-    print()
+    print(file=sys.stderr)
     while True:
         cout("{} [yes/no] ", msg, fg="yellow")
         sys.stderr.flush()
@@ -1044,7 +1044,7 @@ def get_commits_between(a: Commit, b: Commit):
 
 
 def inner_do_sync(syncs: List[StackBranch], sync_names: List[BranchName]):
-    print()
+    print(file=sys.stderr)
     while syncs:
         with open(TMP_STATE_FILE, "w") as f:
             json.dump({"branch": CURRENT_BRANCH, "sync": sync_names}, f)
@@ -1070,7 +1070,7 @@ def inner_do_sync(syncs: List[StackBranch], sync_names: List[BranchName]):
                 check=False,
             )
             if r is None:
-                print()
+                print(file=sys.stderr)
                 die(
                     "Automatic rebase failed. Please complete the rebase (fix conflicts; `git rebase --continue`), then run `stacky continue`"
                 )
@@ -1497,7 +1497,7 @@ def cmd_land(stack: StackBranchSet, args):
     msg += fmt("{}", pr["url"], color=COLOR_STDOUT, fg="blue")
     msg += fmt(") for branch {}", b.name, color=COLOR_STDOUT)
     msg += fmt(" into branch {}\n", b.parent.name, color=COLOR_STDOUT)
-    sys.stdout.write(msg)
+    sys.stderr.write(msg)
 
     if not args.force:
         confirm()
