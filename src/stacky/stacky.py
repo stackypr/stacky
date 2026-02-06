@@ -32,7 +32,17 @@ import subprocess
 import sys
 import time
 from argparse import ArgumentParser
-from typing import Dict, FrozenSet, Generator, List, NewType, Optional, Tuple, TypedDict, Union
+from typing import (
+    Dict,
+    FrozenSet,
+    Generator,
+    List,
+    NewType,
+    Optional,
+    Tuple,
+    TypedDict,
+    Union,
+)
 
 import asciitree  # type: ignore
 import colors  # type: ignore
@@ -115,12 +125,22 @@ class StackyConfig:
             self.share_ssh_session = bool(rawconfig.get("UI", "share_ssh_session", fallback=self.share_ssh_session))
 
 
-CONFIG: StackyConfig
+CONFIG: Optional["StackyConfig"] = None
+
+
+def get_config() -> StackyConfig:
+    global CONFIG
+    if CONFIG is None:
+        CONFIG = read_config()
+    return CONFIG
 
 
 def read_config() -> StackyConfig:
     config = StackyConfig()
-    config_paths = [f"{TOP_LEVEL_DIR}/.stackyconfig", os.path.expanduser("~/.stackyconfig")]
+    config_paths = [
+        f"{TOP_LEVEL_DIR}/.stackyconfig",
+        os.path.expanduser("~/.stackyconfig"),
+    ]
 
     for p in config_paths:
         if os.path.exists(p):
@@ -164,7 +184,8 @@ class ExitException(BaseException):
 
 
 def stop_muxed_ssh(remote: str = "origin"):
-    if CONFIG.share_ssh_session:
+    config = get_config()
+    if config.share_ssh_session:
         hostish = get_remote_type(remote)
         if hostish is not None:
             cmd = gen_ssh_mux_cmd()
@@ -375,7 +396,7 @@ class StackBranch:
     def load_pr_info(self):
         if not self._pr_info_loaded:
             self._pr_info_loaded = True
-            if not self.name in STACK_BOTTOMS:
+            if self.name not in STACK_BOTTOMS:
                 pr_infos = get_pr_info(self.name)
                 # FIXME maybe store the whole object and use it elsewhere
                 self.pr_info, self.open_pr_info = (
@@ -723,7 +744,8 @@ def prompt(message: str, default_value: Optional[str]) -> str:
 
 
 def confirm(msg: str = "Proceed?"):
-    if CONFIG.skip_confirm:
+    config = get_config()
+    if config.skip_confirm:
         return
     if not os.isatty(0):
         die("Standard input is not a terminal, use --force option to force action")
@@ -767,7 +789,7 @@ def find_issue_marker(name: str) -> Optional[str]:
         res = match.group(1)
         if "_" in res:
             return res.replace("_", "-")
-        if not "-" in res:
+        if "-" not in res:
             newmatch = re.match(r"(...)(\d+)", res)
             assert newmatch is not None
             return f"{newmatch.group(1)}-{newmatch.group(2)}"
@@ -922,7 +944,7 @@ def do_push(
         # the should be created is not the same as the one where the push will
         # be made, we need to add a prefix to the branch in the gh pr command
         val = run_always_return(CmdArgs(["git", "config", f"remote.{remote_name}.url"]))
-        prefix = f'{val.split(":")[1].split("/")[0]}:'
+        prefix = f"{val.split(':')[1].split('/')[0]}:"
     else:
         prefix = ""
     for b, push, pr_action in actions:
@@ -981,7 +1003,7 @@ def do_sync(forest: BranchesTreeForest):
         if not b.parent:
             cout("✓ Not syncing base branch {}\n", b.name, fg="green")
             continue
-        if b.is_synced_with_parent() and not b.parent in syncs_set:
+        if b.is_synced_with_parent() and b.parent not in syncs_set:
             cout(
                 "✓ Not syncing branch {}, already synced with parent {}\n",
                 b.name,
@@ -1220,7 +1242,8 @@ def gen_ssh_mux_cmd() -> List[str]:
 
 
 def start_muxed_ssh(remote: str = "origin"):
-    if not CONFIG.share_ssh_session:
+    config = get_config()
+    if not config.share_ssh_session:
         return
     hostish = get_remote_type(remote)
     if hostish is not None:
@@ -1397,13 +1420,14 @@ def cmd_adopt(stack: StackBranch, args):
     valid stack bottom or the stack bottom (master or main) will be used
     if change_to_main option is set in the config file
     """
+    config = get_config()
     branch = args.name
     global CURRENT_BRANCH
     if CURRENT_BRANCH not in STACK_BOTTOMS:
         # TODO remove that, the initialisation code is already dealing with that in fact
         main_branch = get_real_stack_bottom()
 
-        if CONFIG.change_to_main and main_branch is not None:
+        if config.change_to_main and main_branch is not None:
             run(CmdArgs(["git", "checkout", main_branch]))
             CURRENT_BRANCH = main_branch
         else:
@@ -1415,7 +1439,7 @@ def cmd_adopt(stack: StackBranch, args):
     parent_commit = get_merge_base(CURRENT_BRANCH, branch)
     set_parent(branch, CURRENT_BRANCH, set_origin=True)
     set_parent_commit(branch, parent_commit)
-    if CONFIG.change_to_adopted:
+    if config.change_to_adopted:
         run(CmdArgs(["git", "checkout", branch]))
 
 
@@ -1679,6 +1703,7 @@ def main():
 
         global CONFIG
         CONFIG = read_config()
+        config = get_config()
 
         global COLOR_STDERR
         global COLOR_STDOUT
@@ -1717,7 +1742,7 @@ def main():
             if CURRENT_BRANCH not in stack.stack:
                 main_branch = get_real_stack_bottom()
 
-                if CONFIG.change_to_main and main_branch is not None:
+                if config.change_to_main and main_branch is not None:
                     run(["git", "checkout", main_branch])
                     CURRENT_BRANCH = main_branch
                 else:
