@@ -114,15 +114,19 @@ class StackyConfig:
     change_to_main: bool = False
     change_to_adopted: bool = False
     share_ssh_session: bool = False
+    use_worktree: bool = False
+    worktree_root: Optional[str] = None
 
     def read_one_config(self, config_path: str):
         rawconfig = configparser.ConfigParser()
         rawconfig.read(config_path)
         if rawconfig.has_section("UI"):
-            self.skip_confirm = bool(rawconfig.get("UI", "skip_confirm", fallback=self.skip_confirm))
-            self.change_to_main = bool(rawconfig.get("UI", "change_to_main", fallback=self.change_to_main))
-            self.change_to_adopted = bool(rawconfig.get("UI", "change_to_adopted", fallback=self.change_to_adopted))
-            self.share_ssh_session = bool(rawconfig.get("UI", "share_ssh_session", fallback=self.share_ssh_session))
+            self.skip_confirm = rawconfig.getboolean("UI", "skip_confirm", fallback=self.skip_confirm)
+            self.change_to_main = rawconfig.getboolean("UI", "change_to_main", fallback=self.change_to_main)
+            self.change_to_adopted = rawconfig.getboolean("UI", "change_to_adopted", fallback=self.change_to_adopted)
+            self.share_ssh_session = rawconfig.getboolean("UI", "share_ssh_session", fallback=self.share_ssh_session)
+            self.use_worktree = rawconfig.getboolean("UI", "use_worktree", fallback=self.use_worktree)
+            self.worktree_root = rawconfig.get("UI", "worktree_root", fallback=self.worktree_root)
 
 
 CONFIG: Optional["StackyConfig"] = None
@@ -155,11 +159,16 @@ def fmt(s: str, *args, color: bool = False, fg=None, bg=None, style=None, **kwar
 
 
 def cout(*args, **kwargs):
-    return sys.stdout.write(fmt(*args, color=COLOR_STDOUT, **kwargs))
+    return sys.stderr.write(fmt(*args, color=COLOR_STDOUT, **kwargs))
 
 
 def _log(fn, *args, **kwargs):
     return fn("%s", fmt(*args, color=COLOR_STDERR, **kwargs))
+
+
+def emit_location(path: str):
+    sys.stdout.write(f"{path}\n")
+    sys.stdout.flush()
 
 
 def debug(*args, **kwargs):
@@ -552,13 +561,13 @@ def print_tree(tree: BranchesTree):
     global ASCII_TREE
     s = ASCII_TREE(format_tree(tree, colorize=COLOR_STDOUT))
     lines = s.split("\n")
-    print("\n".join(reversed(lines)))
+    print("\n".join(reversed(lines)), file=sys.stderr)
 
 
 def print_forest(trees: List[BranchesTree]):
     for i, t in enumerate(trees):
         if i != 0:
-            print()
+            print(file=sys.stderr)
         print_tree(t)
 
 
@@ -657,9 +666,84 @@ def cmd_info(stack: StackBranchSet, args):
     print_forest(forest)
 
 
+def get_worktree_root() -> str:
+    config = get_config()
+    root = config.worktree_root or os.path.join(TOP_LEVEL_DIR, ".stacky", "worktrees")
+    root = os.path.expanduser(root)
+    if not os.path.isabs(root):
+        root = os.path.join(TOP_LEVEL_DIR, root)
+    return root
+
+
+def worktree_dir_for_branch(branch: BranchName) -> str:
+    safe = str(branch).replace("/", "__")
+    return os.path.join(get_worktree_root(), safe)
+
+
+def _parse_worktree_list(out: str) -> Dict[BranchName, str]:
+    worktrees: Dict[BranchName, str] = {}
+    current_path: Optional[str] = None
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            current_path = line[len("worktree ") :].strip()
+        elif line.startswith("branch ") and current_path is not None:
+            ref = line[len("branch ") :].strip()
+            if ref.startswith("refs/heads/"):
+                branch = BranchName(ref[len("refs/heads/") :])
+                worktrees[branch] = current_path
+    return worktrees
+
+
+def get_worktree_map() -> Dict[BranchName, str]:
+    out = run_multiline(CmdArgs(["git", "worktree", "list", "--porcelain"]))
+    if out is None:
+        return {}
+    return _parse_worktree_list(out)
+
+
+def _choose_worktree_path(root: str, branch: BranchName, existing_paths: List[str]) -> str:
+    safe = str(branch).replace("/", "__")
+    base = os.path.join(root, safe)
+    candidate = base
+    suffix = 1
+    while candidate in existing_paths or os.path.exists(candidate):
+        candidate = f"{base}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def ensure_worktree(branch: BranchName, *, create: bool, base: Optional[BranchName] = None) -> str:
+    worktrees = get_worktree_map()
+    existing_path = worktrees.get(branch)
+    if existing_path:
+        return existing_path
+
+    root = get_worktree_root()
+    os.makedirs(root, exist_ok=True)
+    path = _choose_worktree_path(root, branch, list(worktrees.values()))
+
+    if create:
+        if base is None:
+            base = CURRENT_BRANCH or get_current_branch()
+        if base is None:
+            die("Cannot create worktree branch from a detached HEAD")
+        run(CmdArgs(["git", "worktree", "add", "-b", str(branch), path, str(base)]))
+    else:
+        run(CmdArgs(["git", "worktree", "add", path, str(branch)]))
+    return path
+
+
 def checkout(branch):
+    config = get_config()
+    if config.use_worktree:
+        info("Checking out branch {} using worktree", branch)
+        path = ensure_worktree(BranchName(str(branch)), create=False)
+        emit_location(path)
+        return
+
     info("Checking out branch {}", branch)
-    run(["git", "checkout", branch], out=True)
+    run(["git", "checkout", branch])
+    emit_location(TOP_LEVEL_DIR)
 
 
 def cmd_branch_up(stack: StackBranchSet, args):
@@ -696,7 +780,15 @@ def cmd_branch_down(stack: StackBranchSet, args):
 
 
 def create_branch(branch):
-    run(["git", "checkout", "-b", branch, "--track"], out=True)
+    config = get_config()
+    if config.use_worktree:
+        info("Creating worktree branch {}", branch)
+        path = ensure_worktree(BranchName(str(branch)), create=True, base=CURRENT_BRANCH)
+        emit_location(path)
+        return
+
+    run(["git", "checkout", "-b", branch, "--track"])
+    emit_location(TOP_LEVEL_DIR)
 
 
 def cmd_branch_new(stack: StackBranchSet, args):
@@ -749,7 +841,7 @@ def confirm(msg: str = "Proceed?"):
         return
     if not os.isatty(0):
         die("Standard input is not a terminal, use --force option to force action")
-    print()
+    print(file=sys.stderr)
     while True:
         cout("{} [yes/no] ", msg, fg="yellow")
         sys.stderr.flush()
@@ -1044,7 +1136,7 @@ def get_commits_between(a: Commit, b: Commit):
 
 
 def inner_do_sync(syncs: List[StackBranch], sync_names: List[BranchName]):
-    print()
+    print(file=sys.stderr)
     while syncs:
         with open(TMP_STATE_FILE, "w") as f:
             json.dump({"branch": CURRENT_BRANCH, "sync": sync_names}, f)
@@ -1070,7 +1162,7 @@ def inner_do_sync(syncs: List[StackBranch], sync_names: List[BranchName]):
                 check=False,
             )
             if r is None:
-                print()
+                print(file=sys.stderr)
                 die(
                     "Automatic rebase failed. Please complete the rebase (fix conflicts; `git rebase --continue`), then run `stacky continue`"
                 )
@@ -1497,7 +1589,7 @@ def cmd_land(stack: StackBranchSet, args):
     msg += fmt("{}", pr["url"], color=COLOR_STDOUT, fg="blue")
     msg += fmt(") for branch {}", b.name, color=COLOR_STDOUT)
     msg += fmt(" into branch {}\n", b.parent.name, color=COLOR_STDOUT)
-    sys.stdout.write(msg)
+    sys.stderr.write(msg)
 
     if not args.force:
         confirm()
