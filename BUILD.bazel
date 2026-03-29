@@ -1,12 +1,21 @@
 load("@rules_python//python/pip_install:requirements.bzl", "compile_pip_requirements")
 load("@rules_python//python:defs.bzl", "py_binary")
 load("@pypi//:requirements.bzl", "requirement")
+load("//:build_defs.bzl", "stacky_build_info")
 
+stacky_build_info(
+    name = "stacky_build_info",
+    out = "_stacky_build_info.py",
+)
 
 py_binary(
     name = "stacky",
-    srcs = ["src/stacky/stacky.py"],
+    srcs = [
+        "src/stacky/stacky.py",
+        ":stacky_build_info",
+    ],
     main = "src/stacky/stacky.py",
+    stamp = 1,
     deps = [
         requirement("ansicolors"),
         requirement("simple-term-menu"),

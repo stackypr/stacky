@@ -108,5 +108,46 @@ class TestWorktreeSupport(unittest.TestCase):
             self.assertEqual(out.getvalue().strip(), "/wt/feature")
 
 
+class TestVersionReporting(unittest.TestCase):
+    def test_get_version_string_uses_stamped_module_commit(self):
+        with (
+            mock.patch.object(stacky_module, "stacky_build_info", new=SimpleNamespace(STACKY_BUILD_COMMIT="cafef00d")),
+            mock.patch.object(stacky_module.importlib.metadata, "version", return_value="1.0.13"),
+        ):
+            self.assertEqual(stacky_module.get_version_string(), "stacky 1.0.13 (commit cafef00d)")
+
+    def test_get_version_string_uses_stamped_env_commit(self):
+        with (
+            mock.patch.object(stacky_module, "stacky_build_info", new=None),
+            mock.patch.dict(stacky_module.os.environ, {"STACKY_BUILD_COMMIT": "cafef00d"}, clear=False),
+            mock.patch.object(stacky_module.importlib.metadata, "version", return_value="1.0.13"),
+        ):
+            self.assertEqual(stacky_module.get_version_string(), "stacky 1.0.13 (commit cafef00d)")
+
+    def test_get_version_string_uses_embedded_commit(self):
+        with (
+            mock.patch.dict(stacky_module.os.environ, {}, clear=False),
+            mock.patch.object(stacky_module.importlib.metadata, "version", return_value="1.0.13+gdeadbeef"),
+        ):
+            self.assertEqual(stacky_module.get_version_string(), "stacky 1.0.13+gdeadbeef (commit deadbeef)")
+
+    def test_get_version_string_without_embedded_commit(self):
+        with (
+            mock.patch.dict(stacky_module.os.environ, {"STACKY_BUILD_COMMIT": "not-a-sha"}, clear=False),
+            mock.patch.object(stacky_module.importlib.metadata, "version", return_value="1.0.13"),
+        ):
+            self.assertEqual(stacky_module.get_version_string(), "stacky 1.0.13")
+
+    def test_get_version_string_without_package_metadata(self):
+        with (
+            mock.patch.object(
+                stacky_module.importlib.metadata,
+                "version",
+                side_effect=stacky_module.importlib.metadata.PackageNotFoundError,
+            ),
+        ):
+            self.assertEqual(stacky_module.get_version_string(), "stacky dev")
+
+
 if __name__ == "__main__":
     unittest.main()

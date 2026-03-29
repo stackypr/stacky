@@ -1,1 +1,2 @@
 build --@rules_python//python/config_settings:python_version=3.12
+build --workspace_status_command=./tools/workspace_status.sh

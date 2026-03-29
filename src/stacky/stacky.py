@@ -49,6 +49,11 @@ import asciitree  # type: ignore
 import colors  # type: ignore
 from simple_term_menu import TerminalMenu  # type: ignore
 
+try:
+    import _stacky_build_info as stacky_build_info  # type: ignore
+except Exception:
+    stacky_build_info = None
+
 BranchName = NewType("BranchName", str)
 PathName = NewType("PathName", str)
 Commit = NewType("Commit", str)
@@ -107,6 +112,38 @@ LOGLEVELS = {
     "info": logging.INFO,
     "debug": logging.DEBUG,
 }
+
+
+def _normalize_embedded_commit(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    v = value.strip().lower()
+    if re.fullmatch(r"[0-9a-f]{7,40}", v):
+        return v
+    return None
+
+
+def get_version_string() -> str:
+    package_name = "rockset-stacky"
+    try:
+        version = importlib.metadata.version(package_name)
+    except importlib.metadata.PackageNotFoundError:
+        version = "dev"
+
+    commit = _normalize_embedded_commit(
+        getattr(stacky_build_info, "STACKY_BUILD_COMMIT", None) if stacky_build_info is not None else None
+    )
+    if commit is None:
+        commit = _normalize_embedded_commit(os.environ.get("STACKY_BUILD_COMMIT"))
+
+    # Commit is build metadata embedded into the package version at build time.
+    if commit is None:
+        match = re.search(r"\+g([0-9a-fA-F]{7,40})$", version)
+        commit = match.group(1).lower() if match is not None else None
+
+    if commit is None:
+        return f"stacky {version}"
+    return f"stacky {version} (commit {commit})"
 
 
 @dataclasses.dataclass
@@ -1648,6 +1685,12 @@ def main():
     logging.basicConfig(format=_LOGGING_FORMAT, level=logging.INFO)
     try:
         parser = ArgumentParser(description="Handle git stacks")
+        parser.add_argument(
+            "--version",
+            action="version",
+            version=get_version_string(),
+            help="Print version information",
+        )
         parser.add_argument(
             "--log-level",
             default="info",
