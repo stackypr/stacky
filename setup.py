@@ -1,15 +1,42 @@
+import os
 import pathlib
+import re
+import subprocess
 
 from setuptools import find_packages, setup
 
 here = pathlib.Path(__file__).parent.resolve()
+BASE_VERSION = "1.0.13"
+
+
+def _normalize_commit(value: str) -> str:
+    return re.sub(r"[^0-9a-fA-F]", "", value)[:12].lower()
+
+
+def _detect_commit() -> str:
+    try:
+        out = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=here, text=True, stderr=subprocess.DEVNULL)
+    except Exception:
+        return ""
+    return _normalize_commit(out.strip())
+
+
+def _build_version() -> str:
+    # Prefer an explicit commit from CI; otherwise derive it from the local git checkout.
+    commit = _normalize_commit(str(os.environ.get("STACKY_BUILD_COMMIT", "")))
+    if not commit:
+        commit = _detect_commit()
+    if commit:
+        return f"{BASE_VERSION}+g{commit}"
+    return BASE_VERSION
+
 
 # Get the long description from the README file
 long_description = (here / "README.md").read_text(encoding="utf-8")
 
 setup(
     name="rockset-stacky",
-    version="1.0.13",
+    version=_build_version(),
     description="""
     stacky is a tool to manage stacks of PRs. This allows developers to easily 
     manage many smaller, more targeted PRs that depend on each other.
