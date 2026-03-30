@@ -175,5 +175,50 @@ List of parameters for each sections:
  * change_to_adopted: boolean with a default value of `False`, when set to `True` `stacky` will change the current branch to the adopted one.
  * share_ssh_session: boolean with a default value of `False`, when set to `True` `stacky` will create a shared `ssh` session to the `github.com` server. This is useful when you are pushing a stack of diff and you have some kind of 2FA on your ssh key like the ed25519-sk.
 
+## Shell wrapper for worktree auto-cd
+
+When using `use_worktree = true`, `stacky` prints the target directory on `stdout` (for example after `stacky checkout`, `stacky up`, or `stacky branch new`). A CLI process cannot change the parent shell directory directly, so use a shell function wrapper to auto-`cd` when a directory path is returned.
+
+Add this to your shell config (`~/.bashrc` or `~/.zshrc`):
+
+```bash
+
+st() {
+  case "$1" in
+    checkout|co|sco|up|down|update)
+      ;;
+    branch)
+      case "$2" in
+        new|create|checkout|co|up|u|down|d) ;;
+        *) command stacky "$@"; return $? ;;
+      esac
+      ;;
+    stack)
+      case "$2" in
+        checkout|co) ;;
+        *) command stacky "$@"; return $? ;;
+      esac
+      ;;
+    *)
+      command stacky "$@"
+      return $?
+      ;;
+  esac
+
+  local out rc
+  out="$(command stacky "$@")"
+  rc=$?
+  [ $rc -ne 0 ] && return $rc
+
+  if [ -n "$out" ] && [ -d "$out" ]; then
+    cd "$out" || return 1
+  elif [ -n "$out" ]; then
+    printf '%s\n' "$out"
+  fi
+}
+```
+
+Open a new shell (or reload your shell config), then use `st ...` instead of `stacky ...`.
+
 ## License
 - [MIT License](https://github.com/rockset/stacky/blob/master/LICENSE.txt)

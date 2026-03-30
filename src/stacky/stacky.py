@@ -23,6 +23,7 @@
 
 import configparser
 import dataclasses
+import importlib.metadata
 import json
 import logging
 import os
@@ -100,6 +101,7 @@ IS_TERMINAL: bool = os.isatty(1) and os.isatty(2)
 CURRENT_BRANCH: BranchName
 STACK_BOTTOMS: FrozenSet[BranchName] = frozenset([BranchName("master"), BranchName("main")])
 TOP_LEVEL_DIR: str
+REPO_TOP_LEVEL_DIR: str
 
 STATE_FILE: str
 TMP_STATE_FILE: str
@@ -179,8 +181,9 @@ def get_config() -> StackyConfig:
 
 def read_config() -> StackyConfig:
     config = StackyConfig()
+    repo_top_level = globals().get("REPO_TOP_LEVEL_DIR") or globals().get("TOP_LEVEL_DIR") or os.getcwd()
     config_paths = [
-        f"{TOP_LEVEL_DIR}/.stackyconfig",
+        f"{repo_top_level}/.stackyconfig",
         os.path.expanduser("~/.stackyconfig"),
     ]
 
@@ -197,7 +200,7 @@ def fmt(s: str, *args, color: bool = False, fg=None, bg=None, style=None, **kwar
 
 
 def cout(*args, **kwargs):
-    return sys.stderr.write(fmt(*args, color=COLOR_STDOUT, **kwargs))
+    return sys.stderr.write(fmt(*args, color=COLOR_STDERR, **kwargs))
 
 
 def _log(fn, *args, **kwargs):
@@ -340,6 +343,30 @@ def get_stack_parent_commit(branch: BranchName) -> Optional[Commit]:  # type: ig
 
     if c is not None:
         return Commit(c)
+
+
+def infer_stack_parent_branch(branch: BranchName, parent_commit: Commit) -> Optional[BranchName]:
+    candidates: List[BranchName] = []
+    for candidate in get_all_branches():
+        if candidate == branch:
+            continue
+        merge_base = run(CmdArgs(["git", "merge-base", str(candidate), str(branch)]), check=False)
+        if merge_base == parent_commit:
+            candidates.append(candidate)
+
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    exact_heads = [candidate for candidate in candidates if get_commit(candidate) == parent_commit]
+    if len(exact_heads) == 1:
+        return exact_heads[0]
+
+    bottoms = [candidate for candidate in candidates if candidate in STACK_BOTTOMS]
+    if len(bottoms) == 1:
+        return bottoms[0]
+    return None
 
 
 def get_commit(branch: BranchName) -> Commit:  # type: ignore [return]
@@ -503,6 +530,12 @@ def load_stack_for_given_branch(
     while branch not in STACK_BOTTOMS:
         parent = get_stack_parent_branch(branch)
         parent_commit = get_stack_parent_commit(branch)
+        if parent is None and parent_commit is not None:
+            inferred_parent = infer_stack_parent_branch(branch, parent_commit)
+            if inferred_parent is not None:
+                info("Recovered missing stack parent for {} -> {}", branch, inferred_parent)
+                set_parent(branch, inferred_parent, set_origin=True)
+                parent = inferred_parent
         branches.append(BranchNCommit(branch, parent_commit))
         if not parent or not parent_commit:
             if check:
@@ -600,7 +633,7 @@ ASCII_TREE = asciitree.LeftAligned(draw=_ASCII_TREE_STYLE)
 
 def print_tree(tree: BranchesTree):
     global ASCII_TREE
-    s = ASCII_TREE(format_tree(tree, colorize=COLOR_STDOUT))
+    s = ASCII_TREE(format_tree(tree, colorize=COLOR_STDERR))
     lines = s.split("\n")
     print("\n".join(reversed(lines)), file=sys.stderr)
 
@@ -709,10 +742,11 @@ def cmd_info(stack: StackBranchSet, args):
 
 def get_worktree_root() -> str:
     config = get_config()
-    root = config.worktree_root or os.path.join(TOP_LEVEL_DIR, ".stacky", "worktrees")
+    base = globals().get("REPO_TOP_LEVEL_DIR") or globals().get("TOP_LEVEL_DIR") or os.getcwd()
+    root = config.worktree_root or os.path.join(base, ".stacky", "worktrees")
     root = os.path.expanduser(root)
     if not os.path.isabs(root):
-        root = os.path.join(TOP_LEVEL_DIR, root)
+        root = os.path.join(base, root)
     return root
 
 
@@ -825,6 +859,9 @@ def create_branch(branch):
     if config.use_worktree:
         info("Creating worktree branch {}", branch)
         path = ensure_worktree(BranchName(str(branch)), create=True, base=CURRENT_BRANCH)
+        # Keep stack metadata consistent with non-worktree branch creation.
+        assert CURRENT_BRANCH is not None
+        set_parent(BranchName(str(branch)), CURRENT_BRANCH, set_origin=True)
         emit_location(path)
         return
 
@@ -976,7 +1013,7 @@ def create_gh_pr(b: StackBranch, prefix: str):
                 title = out
 
         title = prompt(
-            (fmt("? ", color=COLOR_STDOUT, fg="green") + fmt("Title ", color=COLOR_STDOUT, style="bold", fg="white")),
+            (fmt("? ", color=COLOR_STDERR, fg="green") + fmt("Title ", color=COLOR_STDERR, style="bold", fg="white")),
             title,
         )
         cmd.extend(["--title", title.strip()])
@@ -1428,6 +1465,7 @@ def get_branches_to_delete(forest: BranchesTreeForest) -> List[StackBranch]:
 
 def delete_branches(stack: StackBranchSet, deletes: List[StackBranch]):
     global CURRENT_BRANCH
+    config = get_config()
     # Make sure we're not trying to delete the current branch
     for b in deletes:
         for c in b.children:
@@ -1438,7 +1476,16 @@ def delete_branches(stack: StackBranchSet, deletes: List[StackBranch]):
         if b.name == CURRENT_BRANCH:
             new_branch = next(iter(stack.bottoms))
             info("About to delete current branch, switching to {}", new_branch.name)
-            run(CmdArgs(["git", "checkout", new_branch.name]))
+            if config.use_worktree:
+                # Branches cannot be deleted while checked out in this worktree.
+                # Switch the target worktree to the desired branch, then detach
+                # this worktree and emit the target location for shell wrappers.
+                path = ensure_worktree(new_branch.name, create=False)
+                run(CmdArgs(["git", "-C", path, "checkout", str(new_branch.name)]))
+                run(CmdArgs(["git", "checkout", "--detach"]))
+                emit_location(path)
+            else:
+                run(CmdArgs(["git", "checkout", new_branch.name]))
             CURRENT_BRANCH = new_branch.name
         run(CmdArgs(["git", "branch", "-D", b.name]))
 
@@ -1561,7 +1608,8 @@ def cmd_adopt(stack: StackBranch, args):
         main_branch = get_real_stack_bottom()
 
         if config.change_to_main and main_branch is not None:
-            run(CmdArgs(["git", "checkout", main_branch]))
+            if not config.use_worktree:
+                run(CmdArgs(["git", "checkout", main_branch]))
             CURRENT_BRANCH = main_branch
         else:
             die(
@@ -1662,10 +1710,10 @@ def cmd_land(stack: StackBranchSet, args):
             fg="yellow",
         )
 
-    msg = fmt("- Will land PR #{} (", pr["number"], color=COLOR_STDOUT)
-    msg += fmt("{}", pr["url"], color=COLOR_STDOUT, fg="blue")
-    msg += fmt(") for branch {}", b.name, color=COLOR_STDOUT)
-    msg += fmt(" into branch {}\n", b.parent.name, color=COLOR_STDOUT)
+    msg = fmt("- Will land PR #{} (", pr["number"], color=COLOR_STDERR)
+    msg += fmt("{}", pr["url"], color=COLOR_STDERR, fg="blue")
+    msg += fmt(") for branch {}", b.name, color=COLOR_STDERR)
+    msg += fmt(" into branch {}\n", b.parent.name, color=COLOR_STDERR)
     sys.stderr.write(msg)
 
     if not args.force:
@@ -1871,8 +1919,14 @@ def main():
         p = run_always_return(CmdArgs(["git", "rev-parse", "--show-toplevel"]))
         global TOP_LEVEL_DIR
         TOP_LEVEL_DIR = os.path.realpath(p)
+        common_git_dir = os.path.realpath(run_always_return(CmdArgs(["git", "rev-parse", "--git-common-dir"])))
+        global REPO_TOP_LEVEL_DIR
+        if os.path.basename(common_git_dir) == ".git":
+            REPO_TOP_LEVEL_DIR = os.path.dirname(common_git_dir)
+        else:
+            REPO_TOP_LEVEL_DIR = TOP_LEVEL_DIR
 
-        mangled_state_prefix = TOP_LEVEL_DIR.replace("_", "_U").replace("~", "_T").replace("/", "_S")
+        mangled_state_prefix = REPO_TOP_LEVEL_DIR.replace("_", "_U").replace("~", "_T").replace("/", "_S")
         global STATE_FILE
         STATE_FILE = os.path.expanduser(f"~/.stacky.state.{mangled_state_prefix}")
 
@@ -1923,7 +1977,8 @@ def main():
                 main_branch = get_real_stack_bottom()
 
                 if config.change_to_main and main_branch is not None:
-                    run(["git", "checkout", main_branch])
+                    if not config.use_worktree:
+                        run(["git", "checkout", main_branch])
                     CURRENT_BRANCH = main_branch
                 else:
                     die("Current branch {} is not in a stack", CURRENT_BRANCH)
