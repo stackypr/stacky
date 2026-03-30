@@ -97,7 +97,9 @@ _LOGGING_FORMAT = "%(asctime)s %(module)s %(levelname)s: %(message)s"
 MAX_SSH_MUX_LIFETIME = 120
 COLOR_STDOUT: bool = os.isatty(1)
 COLOR_STDERR: bool = os.isatty(2)
-IS_TERMINAL: bool = os.isatty(1) and os.isatty(2)
+# Interactivity should depend on input/error streams. stdout may be captured
+# by shell wrappers (for auto-cd) while still being fully interactive.
+IS_TERMINAL: bool = os.isatty(0) and os.isatty(2)
 CURRENT_BRANCH: BranchName
 STACK_BOTTOMS: FrozenSet[BranchName] = frozenset([BranchName("master"), BranchName("main")])
 TOP_LEVEL_DIR: str
@@ -982,6 +984,14 @@ def create_gh_pr(b: StackBranch, prefix: str):
         "--base",
         f"{parent_prefix}{b.parent.name}",
     ]
+    stdout_is_tty = os.isatty(1)
+    if not stdout_is_tty:
+        # Newer gh requires title/body (or --fill*) when stdout is not a tty.
+        cmd.append("--fill")
+        if IS_TERMINAL:
+            # In shell-wrapper mode stdout may be captured, but stdin/stderr are
+            # interactive; open the editor to preserve interactive PR editing.
+            cmd.append("--editor")
     reviewers = find_reviewers(b)
     issue_id = find_issue_marker(b.name)
     if issue_id:
@@ -1012,10 +1022,14 @@ def create_gh_pr(b: StackBranch, prefix: str):
             else:
                 title = out
 
-        title = prompt(
-            (fmt("? ", color=COLOR_STDERR, fg="green") + fmt("Title ", color=COLOR_STDERR, style="bold", fg="white")),
-            title,
-        )
+        if IS_TERMINAL:
+            title = prompt(
+                (
+                    fmt("? ", color=COLOR_STDERR, fg="green")
+                    + fmt("Title ", color=COLOR_STDERR, style="bold", fg="white")
+                ),
+                title,
+            )
         cmd.extend(["--title", title.strip()])
     if reviewers:
         logging.debug(f"Adding {len(reviewers)} reviewer(s) to the review")

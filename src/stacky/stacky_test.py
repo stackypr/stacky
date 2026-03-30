@@ -257,5 +257,37 @@ class TestVersionReporting(unittest.TestCase):
             self.assertEqual(stacky_module.get_version_string(), "stacky dev")
 
 
+class TestGhPrCreate(unittest.TestCase):
+    def test_create_gh_pr_non_interactive_uses_fill(self):
+        parent = SimpleNamespace(name=stacky_module.BranchName("main"))
+        branch = SimpleNamespace(name=stacky_module.BranchName("feature"), parent=parent)
+        with (
+            mock.patch.object(stacky_module, "IS_TERMINAL", False),
+            mock.patch.object(stacky_module.os, "isatty", return_value=False),
+            mock.patch.object(stacky_module, "find_reviewers", return_value=None),
+            mock.patch.object(stacky_module, "find_issue_marker", return_value=None),
+            mock.patch.object(stacky_module, "run") as run_mock,
+        ):
+            stacky_module.create_gh_pr(branch, "")
+        run_mock.assert_called_once()
+        cmd = run_mock.call_args.args[0]
+        self.assertIn("--fill", cmd)
+
+    def test_create_gh_pr_captured_stdout_uses_fill(self):
+        parent = SimpleNamespace(name=stacky_module.BranchName("main"))
+        branch = SimpleNamespace(name=stacky_module.BranchName("feature"), parent=parent)
+        with (
+            mock.patch.object(stacky_module, "IS_TERMINAL", True),
+            mock.patch.object(stacky_module.os, "isatty", side_effect=lambda fd: False if fd == 1 else True),
+            mock.patch.object(stacky_module, "find_reviewers", return_value=None),
+            mock.patch.object(stacky_module, "find_issue_marker", return_value=None),
+            mock.patch.object(stacky_module, "run") as run_mock,
+        ):
+            stacky_module.create_gh_pr(branch, "")
+        cmd = run_mock.call_args.args[0]
+        self.assertIn("--fill", cmd)
+        self.assertIn("--editor", cmd)
+
+
 if __name__ == "__main__":
     unittest.main()
