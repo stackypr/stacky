@@ -3,6 +3,8 @@ import io
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
+from argparse import Namespace
 from unittest import mock
 from unittest.mock import MagicMock
 
@@ -97,6 +99,13 @@ class TestWorktreeSupport(unittest.TestCase):
             stacky_module.CmdArgs(["git", "worktree", "add", "/repo/.stacky/worktrees/feature", "feature"])
         )
 
+    def test_get_worktree_root_uses_repo_top_level(self):
+        cfg = stacky_module.StackyConfig(use_worktree=True, worktree_root=".stacky/worktrees")
+        stacky_module.TOP_LEVEL_DIR = "/repo/.stacky/worktrees/dev__test"
+        stacky_module.REPO_TOP_LEVEL_DIR = "/repo"
+        with mock.patch.object(stacky_module, "get_config", return_value=cfg):
+            self.assertEqual(stacky_module.get_worktree_root(), "/repo/.stacky/worktrees")
+
     def test_checkout_emits_worktree_location(self):
         cfg = stacky_module.StackyConfig(use_worktree=True)
         with (
@@ -106,6 +115,105 @@ class TestWorktreeSupport(unittest.TestCase):
         ):
             stacky_module.checkout(stacky_module.BranchName("feature"))
             self.assertEqual(out.getvalue().strip(), "/wt/feature")
+
+    def test_create_branch_worktree_sets_parent(self):
+        cfg = stacky_module.StackyConfig(use_worktree=True)
+        stacky_module.CURRENT_BRANCH = stacky_module.BranchName("main")
+        with (
+            mock.patch.object(stacky_module, "get_config", return_value=cfg),
+            mock.patch.object(stacky_module, "ensure_worktree", return_value="/wt/feature"),
+            mock.patch.object(stacky_module, "set_parent") as set_parent_mock,
+            mock.patch.object(stacky_module, "emit_location") as emit_location_mock,
+        ):
+            stacky_module.create_branch(stacky_module.BranchName("feature"))
+        set_parent_mock.assert_called_once_with(
+            stacky_module.BranchName("feature"),
+            stacky_module.BranchName("main"),
+            set_origin=True,
+        )
+        emit_location_mock.assert_called_once_with("/wt/feature")
+
+    def test_cmd_adopt_worktree_change_to_main_does_not_checkout(self):
+        cfg = stacky_module.StackyConfig(use_worktree=True, change_to_main=True)
+        stacky_module.CURRENT_BRANCH = stacky_module.BranchName("feature")
+        args = Namespace(name=stacky_module.BranchName("topic"))
+        with (
+            mock.patch.object(stacky_module, "get_config", return_value=cfg),
+            mock.patch.object(stacky_module, "get_real_stack_bottom", return_value=stacky_module.BranchName("main")),
+            mock.patch.object(stacky_module, "run") as run_mock,
+            mock.patch.object(stacky_module, "get_merge_base", return_value="abc123"),
+            mock.patch.object(stacky_module, "set_parent") as set_parent_mock,
+            mock.patch.object(stacky_module, "set_parent_commit") as set_parent_commit_mock,
+        ):
+            stacky_module.cmd_adopt(MagicMock(), args)
+        run_mock.assert_not_called()
+        set_parent_mock.assert_called_once_with(
+            stacky_module.BranchName("topic"),
+            stacky_module.BranchName("main"),
+            set_origin=True,
+        )
+        set_parent_commit_mock.assert_called_once_with(stacky_module.BranchName("topic"), "abc123")
+
+    def test_load_stack_for_given_branch_recovers_missing_parent(self):
+        stack = MagicMock()
+        bottom = MagicMock()
+        child = MagicMock()
+        stack.add.side_effect = [bottom, child]
+
+        with (
+            mock.patch.object(stacky_module, "get_stack_parent_branch", return_value=None),
+            mock.patch.object(stacky_module, "get_stack_parent_commit", return_value=stacky_module.Commit("abc123")),
+            mock.patch.object(
+                stacky_module, "infer_stack_parent_branch", return_value=stacky_module.BranchName("main")
+            ),
+            mock.patch.object(stacky_module, "set_parent") as set_parent_mock,
+        ):
+            top, branches = stacky_module.load_stack_for_given_branch(
+                stack, stacky_module.BranchName("feature"), check=True
+            )
+
+        self.assertIsNotNone(top)
+        self.assertEqual(branches, [stacky_module.BranchName("feature"), stacky_module.BranchName("main")])
+        set_parent_mock.assert_called_once_with(
+            stacky_module.BranchName("feature"),
+            stacky_module.BranchName("main"),
+            set_origin=True,
+        )
+
+    def test_delete_branches_current_branch_worktree_detaches_and_emits_location(self):
+        cfg = stacky_module.StackyConfig(use_worktree=True)
+        stacky_module.CURRENT_BRANCH = stacky_module.BranchName("feature")
+
+        class Bottom:
+            pass
+
+        bottom = Bottom()
+        bottom.name = stacky_module.BranchName("main")
+        stack = MagicMock()
+        stack.bottoms = {bottom}
+
+        branch = MagicMock()
+        branch.name = stacky_module.BranchName("feature")
+        branch.children = []
+
+        with (
+            mock.patch.object(stacky_module, "get_config", return_value=cfg),
+            mock.patch.object(stacky_module, "ensure_worktree", return_value="/wt/main") as ensure_mock,
+            mock.patch.object(stacky_module, "emit_location") as emit_mock,
+            mock.patch.object(stacky_module, "run") as run_mock,
+        ):
+            stacky_module.delete_branches(stack, [branch])
+
+        ensure_mock.assert_called_once_with(stacky_module.BranchName("main"), create=False)
+        emit_mock.assert_called_once_with("/wt/main")
+        run_mock.assert_has_calls(
+            [
+                mock.call(stacky_module.CmdArgs(["git", "-C", "/wt/main", "checkout", "main"])),
+                mock.call(stacky_module.CmdArgs(["git", "checkout", "--detach"])),
+                mock.call(stacky_module.CmdArgs(["git", "branch", "-D", "feature"])),
+            ]
+        )
+        self.assertEqual(stacky_module.CURRENT_BRANCH, stacky_module.BranchName("main"))
 
 
 class TestVersionReporting(unittest.TestCase):
