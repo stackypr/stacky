@@ -84,6 +84,25 @@ class TestWorktreeSupport(unittest.TestCase):
         self.assertTrue(cfg.use_worktree)
         self.assertEqual(cfg.worktree_root, "/tmp/worktrees")
 
+    def test_read_one_config_remote_name(self):
+        cfg = stacky_module.StackyConfig()
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write("[UI]\nremote_name = upstream\n")
+            path = f.name
+        try:
+            cfg.read_one_config(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(cfg.remote_name, "upstream")
+
+    def test_get_gh_repo_parses_https_remote(self):
+        with mock.patch.object(stacky_module, "run", side_effect=[None, "https://github.com/org/repo.git"]):
+            self.assertEqual(stacky_module.get_gh_repo("upstream"), "org/repo")
+
+    def test_get_gh_repo_parses_ssh_remote(self):
+        with mock.patch.object(stacky_module, "run", side_effect=[None, "git@github.com:org/repo.git"]):
+            self.assertEqual(stacky_module.get_gh_repo("upstream"), "org/repo")
+
     @mock.patch.object(stacky_module, "run")
     @mock.patch.object(stacky_module, "run_multiline", return_value="")
     @mock.patch.object(stacky_module.os, "makedirs")
@@ -215,6 +234,24 @@ class TestWorktreeSupport(unittest.TestCase):
         )
         self.assertEqual(stacky_module.CURRENT_BRANCH, stacky_module.BranchName("main"))
 
+    def test_cmd_update_uses_selected_remote(self):
+        stack = MagicMock()
+        stack.bottoms = set()
+        args = Namespace(remote_name="upstream", force=True)
+        with (
+            mock.patch.object(stacky_module, "start_muxed_ssh") as start_mux_mock,
+            mock.patch.object(stacky_module, "stop_muxed_ssh") as stop_mux_mock,
+            mock.patch.object(stacky_module, "run") as run_mock,
+            mock.patch.object(stacky_module, "get_bottom_level_branches_as_forest", return_value=[]),
+            mock.patch.object(stacky_module, "load_pr_info_for_forest"),
+            mock.patch.object(stacky_module, "get_branches_to_delete", return_value=[]),
+            mock.patch.object(stacky_module, "delete_branches"),
+        ):
+            stacky_module.cmd_update(stack, args)
+        start_mux_mock.assert_called_once_with("upstream")
+        run_mock.assert_any_call(stacky_module.CmdArgs(["git", "fetch", "upstream"]))
+        stop_mux_mock.assert_called_once_with("upstream")
+
 
 class TestVersionReporting(unittest.TestCase):
     def test_get_version_string_uses_stamped_module_commit(self):
@@ -266,6 +303,7 @@ class TestGhPrCreate(unittest.TestCase):
             mock.patch.object(stacky_module.os, "isatty", return_value=False),
             mock.patch.object(stacky_module, "find_reviewers", return_value=None),
             mock.patch.object(stacky_module, "find_issue_marker", return_value=None),
+            mock.patch.object(stacky_module, "get_gh_repo", return_value=None),
             mock.patch.object(stacky_module, "run") as run_mock,
         ):
             stacky_module.create_gh_pr(branch, "")
@@ -281,12 +319,28 @@ class TestGhPrCreate(unittest.TestCase):
             mock.patch.object(stacky_module.os, "isatty", side_effect=lambda fd: False if fd == 1 else True),
             mock.patch.object(stacky_module, "find_reviewers", return_value=None),
             mock.patch.object(stacky_module, "find_issue_marker", return_value=None),
+            mock.patch.object(stacky_module, "get_gh_repo", return_value=None),
             mock.patch.object(stacky_module, "run") as run_mock,
         ):
             stacky_module.create_gh_pr(branch, "")
         cmd = run_mock.call_args.args[0]
         self.assertIn("--fill", cmd)
         self.assertIn("--editor", cmd)
+
+    def test_create_gh_pr_adds_repo_target(self):
+        parent = SimpleNamespace(name=stacky_module.BranchName("main"))
+        branch = SimpleNamespace(name=stacky_module.BranchName("feature"), parent=parent)
+        with (
+            mock.patch.object(stacky_module.os, "isatty", return_value=True),
+            mock.patch.object(stacky_module, "find_reviewers", return_value=None),
+            mock.patch.object(stacky_module, "find_issue_marker", return_value=None),
+            mock.patch.object(stacky_module, "get_gh_repo", return_value="acme/repo"),
+            mock.patch.object(stacky_module, "run") as run_mock,
+        ):
+            stacky_module.create_gh_pr(branch, "")
+        cmd = run_mock.call_args.args[0]
+        self.assertIn("-R", cmd)
+        self.assertIn("acme/repo", cmd)
 
 
 if __name__ == "__main__":
