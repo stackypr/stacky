@@ -174,6 +174,7 @@ List of parameters for each sections:
  * change_to_main: boolean with a default value of `False`, by default `stacky` will stop doing action is you are not in a valid stack (ie. a branch that was created or adopted by stacky), when set to `True` `stacky` will first change to `main` or `master` *when* the current branch is not a valid stack.
  * change_to_adopted: boolean with a default value of `False`, when set to `True` `stacky` will change the current branch to the adopted one.
  * share_ssh_session: boolean with a default value of `False`, when set to `True` `stacky` will create a shared `ssh` session to the `github.com` server. This is useful when you are pushing a stack of diff and you have some kind of 2FA on your ssh key like the ed25519-sk.
+ * remote_name: string with a default value of `origin`, sets the default git remote used by commands such as `push` and `update`. You can still override it per command with `--remote-name` / `-r`.
 
 ## Shell wrapper for worktree auto-cd
 

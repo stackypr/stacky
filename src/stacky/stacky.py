@@ -156,6 +156,7 @@ class StackyConfig:
     change_to_main: bool = False
     change_to_adopted: bool = False
     share_ssh_session: bool = False
+    remote_name: Optional[str] = None
     use_worktree: bool = False
     worktree_root: Optional[str] = None
 
@@ -167,6 +168,7 @@ class StackyConfig:
             self.change_to_main = rawconfig.getboolean("UI", "change_to_main", fallback=self.change_to_main)
             self.change_to_adopted = rawconfig.getboolean("UI", "change_to_adopted", fallback=self.change_to_adopted)
             self.share_ssh_session = rawconfig.getboolean("UI", "share_ssh_session", fallback=self.share_ssh_session)
+            self.remote_name = rawconfig.get("UI", "remote_name", fallback=self.remote_name)
             self.use_worktree = rawconfig.getboolean("UI", "use_worktree", fallback=self.use_worktree)
             self.worktree_root = rawconfig.get("UI", "worktree_root", fallback=self.worktree_root)
 
@@ -376,7 +378,29 @@ def get_commit(branch: BranchName) -> Commit:  # type: ignore [return]
     return Commit(c)
 
 
-def get_pr_info(branch: BranchName, *, full: bool = False) -> PRInfos:
+def get_gh_repo(remote_name: str = "origin") -> Optional[str]:
+    gh_resolved = run(CmdArgs(["git", "config", f"remote.{remote_name}.gh-resolved"]), check=False)
+    if gh_resolved is not None and "/" in gh_resolved:
+        return gh_resolved
+
+    url = run(CmdArgs(["git", "config", f"remote.{remote_name}.url"]), check=False)
+    if url is None:
+        return None
+
+    # Support common ssh/https remote URL formats.
+    match = re.match(r"^(?:(?:https?|ssh)://(?:git@)?|git@)?[^/:]+[:/]([^/]+)/(.+?)(?:\.git)?/?$", url)
+    if match is None:
+        return None
+    return f"{match.group(1)}/{match.group(2)}"
+
+
+def maybe_add_gh_repo(cmd: List[str], *, remote_name: str = "origin"):
+    repo = get_gh_repo(remote_name)
+    if repo is not None:
+        cmd.extend(["-R", repo])
+
+
+def get_pr_info(branch: BranchName, *, full: bool = False, remote_name: str = "origin") -> PRInfos:
     fields = [
         "id",
         "number",
@@ -389,23 +413,19 @@ def get_pr_info(branch: BranchName, *, full: bool = False) -> PRInfos:
     ]
     if full:
         fields += ["commits"]
-    data = json.loads(
-        run_always_return(
-            CmdArgs(
-                [
-                    "gh",
-                    "pr",
-                    "list",
-                    "--json",
-                    ",".join(fields),
-                    "--state",
-                    "all",
-                    "--head",
-                    branch,
-                ]
-            )
-        )
-    )
+    cmd = [
+        "gh",
+        "pr",
+        "list",
+        "--json",
+        ",".join(fields),
+        "--state",
+        "all",
+        "--head",
+        branch,
+    ]
+    maybe_add_gh_repo(cmd, remote_name=remote_name)
+    data = json.loads(run_always_return(CmdArgs(cmd)))
     raw_infos: List[PRInfo] = data
 
     infos: Dict[str, PRInfo] = {info["id"]: info for info in raw_infos}
@@ -970,7 +990,7 @@ def find_issue_marker(name: str) -> Optional[str]:
     return None
 
 
-def create_gh_pr(b: StackBranch, prefix: str):
+def create_gh_pr(b: StackBranch, prefix: str, *, remote_name: str = "origin"):
     cout("Creating PR for {}\n", b.name, fg="green")
     parent_prefix = ""
     if b.parent.name not in STACK_BOTTOMS:
@@ -984,6 +1004,7 @@ def create_gh_pr(b: StackBranch, prefix: str):
         "--base",
         f"{parent_prefix}{b.parent.name}",
     ]
+    maybe_add_gh_repo(cmd, remote_name=remote_name)
     stdout_is_tty = os.isatty(1)
     if not stdout_is_tty:
         # Newer gh requires title/body (or --fill*) when stdout is not a tty.
@@ -1149,21 +1170,21 @@ def do_push(
         if pr_action == PR_FIX_BASE:
             cout("Fixing PR base for {}\n", b.name, fg="green")
             assert b.open_pr_info is not None
+            cmd = [
+                "gh",
+                "pr",
+                "edit",
+                str(b.open_pr_info["number"]),
+                "--base",
+                b.parent.name,
+            ]
+            maybe_add_gh_repo(cmd, remote_name=remote_name)
             run(
-                CmdArgs(
-                    [
-                        "gh",
-                        "pr",
-                        "edit",
-                        str(b.open_pr_info["number"]),
-                        "--base",
-                        b.parent.name,
-                    ]
-                ),
+                CmdArgs(cmd),
                 out=True,
             )
         elif pr_action == PR_CREATE:
-            create_gh_pr(b, prefix)
+            create_gh_pr(b, prefix, remote_name=remote_name)
 
     stop_muxed_ssh(remote_name)
 
@@ -1505,7 +1526,7 @@ def delete_branches(stack: StackBranchSet, deletes: List[StackBranch]):
 
 
 def cmd_update(stack: StackBranchSet, args):
-    remote = "origin"
+    remote = args.remote_name
     start_muxed_ssh(remote)
     info("Fetching from {}", remote)
     run(CmdArgs(["git", "fetch", remote]))
@@ -1736,10 +1757,11 @@ def cmd_land(stack: StackBranchSet, args):
     v = run(CmdArgs(["git", "rev-parse", b.name]))
     assert v is not None
     head_commit = Commit(v)
-    cmd = CmdArgs(["gh", "pr", "merge", b.name, "--squash", "--match-head-commit", head_commit])
+    cmd = ["gh", "pr", "merge", b.name, "--squash", "--match-head-commit", head_commit]
+    maybe_add_gh_repo(cmd)
     if args.auto:
         cmd.append("--auto")
-    run(cmd, out=True)
+    run(CmdArgs(cmd), out=True)
     cout("\n✓ Success! Run `stacky update` to update local state.\n", fg="green")
 
 
@@ -1768,7 +1790,7 @@ def main():
         parser.add_argument(
             "--remote-name",
             "-r",
-            default="origin",
+            default=None,
             help="name of the git remote where branches will be pushed",
         )
 
@@ -1952,6 +1974,8 @@ def main():
         global CONFIG
         CONFIG = read_config()
         config = get_config()
+        if args.remote_name is None:
+            args.remote_name = config.remote_name or "origin"
 
         global COLOR_STDERR
         global COLOR_STDOUT
