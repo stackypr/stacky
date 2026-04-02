@@ -91,6 +91,12 @@ class BranchNCommit:
     parent_commit: Optional[str]
 
 
+@dataclasses.dataclass
+class WorktreeEntry:
+    path: str
+    branch: Optional[BranchName]
+
+
 _LOGGING_FORMAT = "%(asctime)s %(module)s %(levelname)s: %(message)s"
 
 # 2 minutes ought to be enough for anybody ;-)
@@ -777,47 +783,136 @@ def worktree_dir_for_branch(branch: BranchName) -> str:
     return os.path.join(get_worktree_root(), safe)
 
 
-def _parse_worktree_list(out: str) -> Dict[BranchName, str]:
-    worktrees: Dict[BranchName, str] = {}
+def _parse_worktree_entries(out: str) -> List[WorktreeEntry]:
+    entries: List[WorktreeEntry] = []
     current_path: Optional[str] = None
+    current_branch: Optional[BranchName] = None
     for line in out.splitlines():
+        if not line:
+            if current_path is not None:
+                entries.append(WorktreeEntry(path=current_path, branch=current_branch))
+            current_path = None
+            current_branch = None
+            continue
         if line.startswith("worktree "):
             current_path = line[len("worktree ") :].strip()
-        elif line.startswith("branch ") and current_path is not None:
+            current_branch = None
+            continue
+        if line.startswith("branch ") and current_path is not None:
             ref = line[len("branch ") :].strip()
             if ref.startswith("refs/heads/"):
-                branch = BranchName(ref[len("refs/heads/") :])
-                worktrees[branch] = current_path
+                current_branch = BranchName(ref[len("refs/heads/") :])
+    if current_path is not None:
+        entries.append(WorktreeEntry(path=current_path, branch=current_branch))
+    return entries
+
+
+def _parse_worktree_list(out: str) -> Dict[BranchName, str]:
+    worktrees: Dict[BranchName, str] = {}
+    for entry in _parse_worktree_entries(out):
+        if entry.branch is not None:
+            worktrees[entry.branch] = entry.path
     return worktrees
 
 
 def get_worktree_map() -> Dict[BranchName, str]:
+    return {entry.branch: entry.path for entry in get_worktree_entries() if entry.branch is not None}
+
+
+def get_worktree_entries() -> List[WorktreeEntry]:
     out = run_multiline(CmdArgs(["git", "worktree", "list", "--porcelain"]))
     if out is None:
-        return {}
-    return _parse_worktree_list(out)
+        return []
+    return _parse_worktree_entries(out)
 
 
-def _choose_worktree_path(root: str, branch: BranchName, existing_paths: List[str]) -> str:
-    safe = str(branch).replace("/", "__")
-    base = os.path.join(root, safe)
-    candidate = base
-    suffix = 1
-    while candidate in existing_paths or os.path.exists(candidate):
-        candidate = f"{base}-{suffix}"
-        suffix += 1
-    return candidate
+def _is_managed_worktree_path(root: str, path: str) -> bool:
+    path_real = os.path.realpath(path)
+    root_real = os.path.realpath(root)
+    if os.path.dirname(path_real) != root_real:
+        return False
+    return re.fullmatch(r"checkout-\d+", os.path.basename(path_real)) is not None
+
+
+def _worktree_pool_index(root: str, path: str) -> Optional[int]:
+    path_real = os.path.realpath(path)
+    root_real = os.path.realpath(root)
+    if os.path.dirname(path_real) != root_real:
+        return None
+    m = re.fullmatch(r"checkout-(\d+)", os.path.basename(path_real))
+    if m is None:
+        return None
+    return int(m.group(1))
+
+
+def _next_worktree_pool_path(root: str, existing_paths: List[str]) -> str:
+    used_indices = set()
+    for path in existing_paths:
+        idx = _worktree_pool_index(root, path)
+        if idx is not None:
+            used_indices.add(idx)
+    candidate = 1
+    while candidate in used_indices:
+        candidate += 1
+    return os.path.join(root, f"checkout-{candidate}")
+
+
+def _find_spare_worktree_path(root: str, entries: List[WorktreeEntry]) -> Optional[str]:
+    spares = [entry.path for entry in entries if entry.branch is None and _is_managed_worktree_path(root, entry.path)]
+    if not spares:
+        return None
+    spares.sort(key=lambda p: _worktree_pool_index(root, p) or 10**9)
+    return spares[0]
+
+
+def _get_worktree_reset_branch() -> BranchName:
+    main_branch = get_real_stack_bottom()
+    if main_branch is not None:
+        return main_branch
+    for candidate in ["main", "master"]:
+        ref = f"refs/heads/{candidate}"
+        if run(CmdArgs(["git", "rev-parse", "--verify", ref]), check=False) is not None:
+            return BranchName(candidate)
+    die("Cannot find main/master branch for worktree reset")
+    return BranchName("main")
+
+
+def _recycle_worktree_path(path: str):
+    root = get_worktree_root()
+    if not _is_managed_worktree_path(root, path):
+        return
+    target = _get_worktree_reset_branch()
+    run(CmdArgs(["git", "-C", path, "checkout", "--detach", str(target)]))
+    run(CmdArgs(["git", "-C", path, "reset", "--hard", str(target)]))
+
+
+def _list_spare_worktree_paths(root: str, entries: List[WorktreeEntry]) -> List[str]:
+    spares = [entry.path for entry in entries if entry.branch is None and _is_managed_worktree_path(root, entry.path)]
+    spares.sort(key=lambda p: _worktree_pool_index(root, p) or 10**9)
+    return spares
 
 
 def ensure_worktree(branch: BranchName, *, create: bool, base: Optional[BranchName] = None) -> str:
-    worktrees = get_worktree_map()
-    existing_path = worktrees.get(branch)
+    entries = get_worktree_entries()
+    existing_path = next((entry.path for entry in entries if entry.branch == branch), None)
     if existing_path:
         return existing_path
 
     root = get_worktree_root()
     os.makedirs(root, exist_ok=True)
-    path = _choose_worktree_path(root, branch, list(worktrees.values()))
+    spare_path = _find_spare_worktree_path(root, entries)
+    if spare_path:
+        if create:
+            if base is None:
+                base = CURRENT_BRANCH or get_current_branch()
+            if base is None:
+                die("Cannot create worktree branch from a detached HEAD")
+            run(CmdArgs(["git", "-C", spare_path, "checkout", "-b", str(branch), str(base)]))
+        else:
+            run(CmdArgs(["git", "-C", spare_path, "checkout", str(branch)]))
+        return spare_path
+
+    path = _next_worktree_pool_path(root, [entry.path for entry in entries])
 
     if create:
         if base is None:
@@ -1518,11 +1613,38 @@ def delete_branches(stack: StackBranchSet, deletes: List[StackBranch]):
                 path = ensure_worktree(new_branch.name, create=False)
                 run(CmdArgs(["git", "-C", path, "checkout", str(new_branch.name)]))
                 run(CmdArgs(["git", "checkout", "--detach"]))
+                current_path = globals().get("TOP_LEVEL_DIR")
+                if current_path:
+                    _recycle_worktree_path(current_path)
                 emit_location(path)
             else:
                 run(CmdArgs(["git", "checkout", new_branch.name]))
             CURRENT_BRANCH = new_branch.name
+        elif config.use_worktree:
+            branch_worktree = get_worktree_map().get(b.name)
+            if branch_worktree:
+                _recycle_worktree_path(branch_worktree)
         run(CmdArgs(["git", "branch", "-D", b.name]))
+
+
+def cmd_worktree_gc(stack: StackBranchSet, args):  # noqa: ARG001
+    config = get_config()
+    if not config.use_worktree:
+        info("Worktree pooling is disabled (`use_worktree = false`), nothing to GC")
+        return
+    if args.max_spares < 0:
+        die("Invalid --max-spares {}, expected >= 0", args.max_spares)
+    root = get_worktree_root()
+    entries = get_worktree_entries()
+    spares = _list_spare_worktree_paths(root, entries)
+    if len(spares) <= args.max_spares:
+        info("Spare worktrees: {}, max allowed: {} (nothing to remove)", len(spares), args.max_spares)
+        return
+    to_remove = spares[args.max_spares :]
+    for path in to_remove:
+        info("Removing spare worktree {}", path)
+        run(CmdArgs(["git", "worktree", "remove", path]))
+    run(CmdArgs(["git", "worktree", "prune"]))
 
 
 def cmd_update(stack: StackBranchSet, args):
@@ -1905,6 +2027,18 @@ def main():
         update_parser = subparsers.add_parser("update", help="Update repo")
         update_parser.add_argument("--force", "-f", action="store_true", help="Bypass confirmation")
         update_parser.set_defaults(func=cmd_update)
+
+        # worktree
+        worktree_parser = subparsers.add_parser("worktree", help="Manage stacky worktree pool")
+        worktree_subparsers = worktree_parser.add_subparsers(required=True, dest="worktree_command")
+        worktree_gc_parser = worktree_subparsers.add_parser("gc", help="Garbage collect spare pooled worktrees")
+        worktree_gc_parser.add_argument(
+            "--max-spares",
+            type=int,
+            default=2,
+            help="Maximum number of spare pooled worktrees to keep",
+        )
+        worktree_gc_parser.set_defaults(func=cmd_worktree_gc)
 
         # import
         import_parser = subparsers.add_parser("import", help="Import Graphite stack")
