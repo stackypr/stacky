@@ -47,6 +47,7 @@ Syntax is as follows:
 - `stacky upstack onto <target>`: restack the current branch (and everything upstack from it) on top of another branch (like `gt us onto`), useful if you’ve made a separate PR that you want to include in your stack
 - `stacky continue`: continue an interrupted stacky sync command (because of conflicts)
 - `stacky update`: will pull changes from github and update master, and deletes branches that have been merged into master
+- `stacky worktree gc [--max-spares N]`: remove extra spare pooled worktrees when using `use_worktree = true`
 
 The indicators (`*`, `~`, `!`) mean:
 - `*` — this is the current branch
@@ -56,12 +57,12 @@ The indicators (`*`, `~`, `!`) mean:
 ```
 $ stacky --help
 usage: stacky [-h] [--color {always,auto,never}]
-              {continue,info,commit,amend,branch,b,stack,s,upstack,us,downstack,ds,update,import,adopt,land,push,sync,checkout,co,sco} ...
+              {continue,info,commit,amend,branch,b,stack,s,upstack,us,downstack,ds,update,worktree,import,adopt,land,push,sync,checkout,co,sco} ...
 
 Handle git stacks
 
 positional arguments:
-  {continue,info,commit,amend,branch,b,stack,s,upstack,us,downstack,ds,update,import,adopt,land,push,sync,checkout,co,sco}
+  {continue,info,commit,amend,branch,b,stack,s,upstack,us,downstack,ds,update,worktree,import,adopt,land,push,sync,checkout,co,sco}
     continue            Continue previously interrupted command
     info                Stack info
     commit              Commit
@@ -71,6 +72,7 @@ positional arguments:
     upstack (us)        Operations on the current upstack
     downstack (ds)      Operations on the current downstack
     update              Update repo
+    worktree            Manage stacky worktree pool
     adopt               Adopt one branch
     land                Land bottom-most PR on current stack
     push                Alias for downstack push
@@ -175,6 +177,8 @@ List of parameters for each sections:
  * change_to_adopted: boolean with a default value of `False`, when set to `True` `stacky` will change the current branch to the adopted one.
  * share_ssh_session: boolean with a default value of `False`, when set to `True` `stacky` will create a shared `ssh` session to the `github.com` server. This is useful when you are pushing a stack of diff and you have some kind of 2FA on your ssh key like the ed25519-sk.
  * remote_name: string with a default value of `origin`, sets the default git remote used by commands such as `push` and `update`. You can still override it per command with `--remote-name` / `-r`.
+ * use_worktree: boolean with a default value of `False`, when set to `True` branch checkout and branch creation use dedicated git worktrees.
+ * worktree_root: string with a default value of `.stacky/worktrees`, controls where stacky stores managed worktrees.
 
 ## Shell wrapper for worktree auto-cd
 
