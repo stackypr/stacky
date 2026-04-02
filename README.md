@@ -48,6 +48,7 @@ Syntax is as follows:
 - `stacky continue`: continue an interrupted stacky sync command (because of conflicts)
 - `stacky update`: will pull changes from github and update master, and deletes branches that have been merged into master
 - `stacky worktree gc [--max-spares N]`: remove extra spare pooled worktrees when using `use_worktree = true`
+- `stacky shell setup`: generate completion and wrapper scripts for your shell
 
 The indicators (`*`, `~`, `!`) mean:
 - `*` — this is the current branch
@@ -57,12 +58,12 @@ The indicators (`*`, `~`, `!`) mean:
 ```
 $ stacky --help
 usage: stacky [-h] [--color {always,auto,never}]
-              {continue,info,commit,amend,branch,b,stack,s,upstack,us,downstack,ds,update,worktree,import,adopt,land,push,sync,checkout,co,sco} ...
+              {continue,info,commit,amend,branch,b,stack,s,upstack,us,downstack,ds,update,worktree,shell,import,adopt,land,push,sync,checkout,co,sco} ...
 
 Handle git stacks
 
 positional arguments:
-  {continue,info,commit,amend,branch,b,stack,s,upstack,us,downstack,ds,update,worktree,import,adopt,land,push,sync,checkout,co,sco}
+  {continue,info,commit,amend,branch,b,stack,s,upstack,us,downstack,ds,update,worktree,shell,import,adopt,land,push,sync,checkout,co,sco}
     continue            Continue previously interrupted command
     info                Stack info
     commit              Commit
@@ -73,6 +74,7 @@ positional arguments:
     downstack (ds)      Operations on the current downstack
     update              Update repo
     worktree            Manage stacky worktree pool
+    shell               Generate shell integration scripts
     adopt               Adopt one branch
     land                Land bottom-most PR on current stack
     push                Alias for downstack push
@@ -184,46 +186,19 @@ List of parameters for each sections:
 
 When using `use_worktree = true`, `stacky` prints the target directory on `stdout` (for example after `stacky checkout`, `stacky up`, or `stacky branch new`). A CLI process cannot change the parent shell directory directly, so use a shell function wrapper to auto-`cd` when a directory path is returned.
 
-Add this to your shell config (`~/.bashrc` or `~/.zshrc`):
+Generate both completion and wrapper scripts:
 
 ```bash
-
-st() {
-  case "$1" in
-    checkout|co|sco|up|down|update)
-      ;;
-    branch)
-      case "$2" in
-        new|create|checkout|co|up|u|down|d) ;;
-        *) command stacky "$@"; return $? ;;
-      esac
-      ;;
-    stack)
-      case "$2" in
-        checkout|co) ;;
-        *) command stacky "$@"; return $? ;;
-      esac
-      ;;
-    *)
-      command stacky "$@"
-      return $?
-      ;;
-  esac
-
-  local out rc
-  out="$(command stacky "$@")"
-  rc=$?
-  [ $rc -ne 0 ] && return $rc
-
-  if [ -n "$out" ] && [ -d "$out" ]; then
-    cd "$out" || return 1
-  elif [ -n "$out" ]; then
-    printf '%s\n' "$out"
-  fi
-}
+stacky shell setup --shell bash
+# or:
+stacky shell setup --shell zsh
 ```
 
-Open a new shell (or reload your shell config), then use `st ...` instead of `stacky ...`.
+The command prints the `source ...` lines to add to your shell config (`~/.bashrc` or `~/.zshrc`).
+
+For manual use:
+- `stacky shell completion --shell bash|zsh`
+- `stacky shell wrapper --function-name st`
 
 ## License
 - [MIT License](https://github.com/rockset/stacky/blob/master/LICENSE.txt)

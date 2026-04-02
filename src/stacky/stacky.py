@@ -31,6 +31,7 @@ import re
 import shlex
 import subprocess
 import sys
+import textwrap
 import time
 from argparse import ArgumentParser
 from typing import (
@@ -220,6 +221,206 @@ def _log(fn, *args, **kwargs):
 def emit_location(path: str):
     sys.stdout.write(f"{path}\n")
     sys.stdout.flush()
+
+
+def _default_shell() -> str:
+    shell = os.path.basename(os.environ.get("SHELL", ""))
+    if shell in ["bash", "zsh"]:
+        return shell
+    return "bash"
+
+
+def render_shell_wrapper(function_name: str, stacky_command: str) -> str:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", function_name):
+        die("Invalid function name {}", function_name)
+    cmd = shlex.quote(stacky_command)
+    return textwrap.dedent(f"""\
+        {function_name}() {{
+          case "$1" in
+            checkout|co|sco|up|down|update)
+              ;;
+            branch|b)
+              case "$2" in
+                new|create|checkout|co|up|u|down|d) ;;
+                *) command {cmd} "$@"; return $? ;;
+              esac
+              ;;
+            stack)
+              case "$2" in
+                checkout|co) ;;
+                *) command {cmd} "$@"; return $? ;;
+              esac
+              ;;
+            *)
+              command {cmd} "$@"
+              return $?
+              ;;
+          esac
+
+          local out rc
+          out="$(command {cmd} "$@")"
+          rc=$?
+          [ $rc -ne 0 ] && return $rc
+
+          if [ -n "$out" ] && [ -d "$out" ]; then
+            cd "$out" || return 1
+          elif [ -n "$out" ]; then
+            printf '%s\\n' "$out"
+          fi
+        }}
+        """)
+
+
+def _completion_targets(stacky_command: str, extra: Optional[List[str]] = None) -> List[str]:
+    targets = [os.path.basename(stacky_command), "st"]
+    if extra:
+        targets.extend(extra)
+    deduped: List[str] = []
+    seen = set()
+    for target in targets:
+        if not target:
+            continue
+        if target in seen:
+            continue
+        seen.add(target)
+        deduped.append(target)
+    return deduped
+
+
+def render_shell_completion(shell: str, stacky_command: str, extra_targets: Optional[List[str]] = None) -> str:
+    cmd = shlex.quote(stacky_command)
+    completion_targets = " ".join(shlex.quote(t) for t in _completion_targets(stacky_command, extra_targets))
+    body = textwrap.dedent(f"""\
+        _stacky__parse_subcommands() {{
+          local out parsed
+          out="$("$1" "${{@:2}}" --help 2>/dev/null)"
+          parsed="$(printf '%s\\n' "$out" | awk '
+            BEGIN {{ in_pos = 0 }}
+            /^positional arguments:/ {{ in_pos = 1; next }}
+            in_pos && /^[[:space:]]+\\{{/ {{
+              line = $0
+              sub(/^[[:space:]]*\\{{/, "", line)
+              sub(/\\}}.*/, "", line)
+              gsub(/,/, " ", line)
+              print line
+              exit
+            }}
+          ')"
+          if [ -n "$parsed" ]; then
+            printf '%s\\n' "$parsed"
+            return 0
+          fi
+          # Fallback: take the last {{...}} group from usage (usually subcommands).
+          printf '%s\\n' "$out" | sed -n 's/.*{{\\([^}}]*\\)}}[^}}]*$/\\1/p' | head -n 1 | tr ',' ' '
+        }}
+
+        _stacky__parse_options() {{
+          "$1" "${{@:2}}" --help 2>/dev/null | grep -oE -- '--[a-zA-Z0-9-]+' | sort -u
+        }}
+
+        _stacky__local_branches() {{
+          git for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null
+        }}
+
+        _stacky_complete() {{
+          local cur prev first second stacky_cmd subcmds opts
+          COMPREPLY=()
+          cur="${{COMP_WORDS[COMP_CWORD]}}"
+          prev="${{COMP_WORDS[COMP_CWORD-1]}}"
+          first="${{COMP_WORDS[1]}}"
+          second="${{COMP_WORDS[2]}}"
+          stacky_cmd={cmd}
+          subcmds=""
+          opts=""
+
+          if [ "$prev" = "--shell" ]; then
+            COMPREPLY=( $(compgen -W "bash zsh" -- "$cur") )
+            return 0
+          fi
+          if [ "$prev" = "--output-dir" ]; then
+            COMPREPLY=( $(compgen -d -- "$cur") )
+            return 0
+          fi
+
+          if [ "$COMP_CWORD" -le 1 ]; then
+            subcmds="$(_stacky__parse_subcommands "$stacky_cmd")"
+            opts="$(_stacky__parse_options "$stacky_cmd")"
+            COMPREPLY=( $(compgen -W "$subcmds $opts" -- "$cur") )
+            return 0
+          fi
+
+          # Complete branch names locally for checkout-like commands.
+          if [ "$COMP_CWORD" -eq 2 ] && [[ "$first" == "checkout" || "$first" == "co" ]]; then
+            COMPREPLY=( $(compgen -W "$(_stacky__local_branches)" -- "$cur") )
+            return 0
+          fi
+          if [ "$COMP_CWORD" -eq 3 ] && [[ "$first" == "branch" || "$first" == "b" ]] && [[ "$second" == "checkout" || "$second" == "co" ]]; then
+            COMPREPLY=( $(compgen -W "$(_stacky__local_branches)" -- "$cur") )
+            return 0
+          fi
+          if [ "$COMP_CWORD" -eq 3 ] && [[ "$first" == "stack" || "$first" == "s" ]] && [[ "$second" == "checkout" || "$second" == "co" ]]; then
+            COMPREPLY=( $(compgen -W "$(_stacky__local_branches)" -- "$cur") )
+            return 0
+          fi
+
+          case "$first" in
+            branch|b|stack|s|upstack|us|downstack|ds|worktree|shell)
+              subcmds="$(_stacky__parse_subcommands "$stacky_cmd" "$first")"
+              opts="$(_stacky__parse_options "$stacky_cmd" "$first")"
+              ;;
+            *)
+              opts="$(_stacky__parse_options "$stacky_cmd")"
+              ;;
+          esac
+
+          if [[ "$cur" == -* ]]; then
+            COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            return 0
+          fi
+
+          COMPREPLY=( $(compgen -W "$subcmds" -- "$cur") )
+          return 0
+        }}
+
+        complete -F _stacky_complete {completion_targets}
+        """)
+    if shell == "zsh":
+        return textwrap.dedent(f"""\
+            autoload -Uz bashcompinit
+            bashcompinit
+
+            {body}
+            """)
+    return body
+
+
+def cmd_shell_completion(args):
+    sys.stdout.write(render_shell_completion(args.shell, args.stacky_command, extra_targets=args.completion_target))
+
+
+def cmd_shell_wrapper(args):
+    sys.stdout.write(render_shell_wrapper(args.function_name, args.stacky_command))
+
+
+def cmd_shell_setup(args):
+    output_dir = os.path.realpath(os.path.expanduser(args.output_dir))
+    os.makedirs(output_dir, exist_ok=True)
+    completion_path = os.path.join(output_dir, f"stacky-completion.{args.shell}")
+    wrapper_path = os.path.join(output_dir, f"stacky-wrapper.{args.shell}")
+    with open(completion_path, "w") as f:
+        f.write(
+            render_shell_completion(
+                args.shell,
+                args.stacky_command,
+                extra_targets=[args.function_name] + (args.completion_target or []),
+            )
+        )
+    with open(wrapper_path, "w") as f:
+        f.write(render_shell_wrapper(args.function_name, args.stacky_command))
+    info("Wrote completion script to {}", completion_path)
+    info("Wrote wrapper script to {}", wrapper_path)
+    sys.stdout.write(f"source {shlex.quote(completion_path)}\n")
+    sys.stdout.write(f"source {shlex.quote(wrapper_path)}\n")
 
 
 def debug(*args, **kwargs):
@@ -2040,6 +2241,75 @@ def main():
         )
         worktree_gc_parser.set_defaults(func=cmd_worktree_gc)
 
+        # shell
+        shell_parser = subparsers.add_parser("shell", help="Generate shell integration scripts")
+        shell_subparsers = shell_parser.add_subparsers(required=True, dest="shell_command")
+
+        shell_completion_parser = shell_subparsers.add_parser("completion", help="Print shell completion script")
+        shell_completion_parser.add_argument(
+            "--shell",
+            choices=["bash", "zsh"],
+            default=_default_shell(),
+            help="Target shell",
+        )
+        shell_completion_parser.add_argument(
+            "--stacky-command",
+            default="stacky",
+            help="Command name used to invoke stacky",
+        )
+        shell_completion_parser.add_argument(
+            "--completion-target",
+            action="append",
+            default=[],
+            help="Additional command/function name to enable completion for (repeatable)",
+        )
+        shell_completion_parser.set_defaults(func=cmd_shell_completion)
+
+        shell_wrapper_parser = shell_subparsers.add_parser("wrapper", help="Print auto-cd shell wrapper function")
+        shell_wrapper_parser.add_argument(
+            "--function-name",
+            default="st",
+            help="Name of the shell wrapper function",
+        )
+        shell_wrapper_parser.add_argument(
+            "--stacky-command",
+            default="stacky",
+            help="Command name used to invoke stacky",
+        )
+        shell_wrapper_parser.set_defaults(func=cmd_shell_wrapper)
+
+        shell_setup_parser = shell_subparsers.add_parser(
+            "setup", help="Write completion and wrapper scripts to a directory"
+        )
+        shell_setup_parser.add_argument(
+            "--shell",
+            choices=["bash", "zsh"],
+            default=_default_shell(),
+            help="Target shell",
+        )
+        shell_setup_parser.add_argument(
+            "--output-dir",
+            default=os.path.expanduser("~/.stacky/shell"),
+            help="Directory where generated scripts will be written",
+        )
+        shell_setup_parser.add_argument(
+            "--function-name",
+            default="st",
+            help="Name of the shell wrapper function",
+        )
+        shell_setup_parser.add_argument(
+            "--stacky-command",
+            default="stacky",
+            help="Command name used to invoke stacky",
+        )
+        shell_setup_parser.add_argument(
+            "--completion-target",
+            action="append",
+            default=[],
+            help="Additional command/function name to enable completion for (repeatable)",
+        )
+        shell_setup_parser.set_defaults(func=cmd_shell_setup)
+
         # import
         import_parser = subparsers.add_parser("import", help="Import Graphite stack")
         import_parser.add_argument("--force", "-f", action="store_true", help="Bypass confirmation")
@@ -2085,6 +2355,10 @@ def main():
 
         args = parser.parse_args()
         logging.basicConfig(format=_LOGGING_FORMAT, level=LOGLEVELS[args.log_level], force=True)
+
+        if args.command == "shell":
+            args.func(args)
+            return
 
         p = run_always_return(CmdArgs(["git", "rev-parse", "--show-toplevel"]))
         global TOP_LEVEL_DIR

@@ -302,6 +302,41 @@ class TestWorktreeSupport(unittest.TestCase):
         stop_mux_mock.assert_called_once_with("upstream")
 
 
+class TestShellSupport(unittest.TestCase):
+    def test_render_shell_wrapper_uses_custom_names(self):
+        out = stacky_module.render_shell_wrapper("myst", "my-stacky")
+        self.assertIn("myst()", out)
+        self.assertIn("command my-stacky", out)
+        self.assertIn("branch|b)", out)
+
+    def test_render_shell_completion_contains_complete_target(self):
+        out = stacky_module.render_shell_completion("bash", "/usr/local/bin/stacky")
+        self.assertIn("complete -F _stacky_complete stacky st", out)
+        self.assertIn('_stacky__parse_subcommands "$stacky_cmd"', out)
+        self.assertIn("_stacky__local_branches", out)
+        self.assertIn('[[ "$first" == "checkout" || "$first" == "co" ]]', out)
+
+    def test_cmd_shell_setup_writes_scripts_and_prints_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            real_tmp = os.path.realpath(tmp)
+            args = Namespace(
+                shell="bash",
+                output_dir=tmp,
+                function_name="st",
+                stacky_command="stacky",
+                completion_target=[],
+            )
+            with mock.patch.object(stacky_module.sys, "stdout", new=io.StringIO()) as out:
+                stacky_module.cmd_shell_setup(args)
+                stdout_value = out.getvalue()
+            completion_path = os.path.join(real_tmp, "stacky-completion.bash")
+            wrapper_path = os.path.join(real_tmp, "stacky-wrapper.bash")
+            self.assertTrue(os.path.exists(completion_path))
+            self.assertTrue(os.path.exists(wrapper_path))
+            self.assertIn(f"source {completion_path}", stdout_value)
+            self.assertIn(f"source {wrapper_path}", stdout_value)
+
+
 class TestVersionReporting(unittest.TestCase):
     def test_get_version_string_uses_stamped_module_commit(self):
         with (
