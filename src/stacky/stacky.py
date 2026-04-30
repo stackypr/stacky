@@ -38,6 +38,7 @@ from typing import (
     Generator,
     List,
     NewType,
+    NoReturn,
     Optional,
     Tuple,
     TypedDict,
@@ -195,7 +196,7 @@ def stop_muxed_ssh(remote: str = "origin"):
             subprocess.Popen(cmd, stderr=subprocess.DEVNULL)
 
 
-def die(*args, **kwargs):
+def die(*args, **kwargs) -> NoReturn:
     # We are taking a wild guess at what is the remote ...
     # TODO (mpatou) fix the assumption about the remote
     stop_muxed_ssh()
@@ -343,6 +344,17 @@ def get_pr_info(branch: BranchName, *, full: bool = False) -> PRInfos:
     return PRInfos(infos, open_prs[0] if open_prs else None)
 
 
+def get_remote_commit(branch: BranchName) -> Commit | None:
+    remote = "origin"
+    c = run(
+        CmdArgs(["git", "rev-parse", "refs/remotes/{}/{}".format(remote, branch)]),
+        check=False,
+    )
+    if c is not None:
+        c = Commit(c)
+    return c
+
+
 # (remote, remote_branch, remote_branch_commit)
 def get_remote_info(branch: BranchName) -> Tuple[str, BranchName, Optional[Commit]]:
     if branch not in STACK_BOTTOMS:
@@ -354,15 +366,7 @@ def get_remote_info(branch: BranchName) -> Tuple[str, BranchName, Optional[Commi
     remote = "origin"
     remote_branch = branch
 
-    remote_commit = run(
-        CmdArgs(["git", "rev-parse", "refs/remotes/{}/{}".format(remote, remote_branch)]),
-        check=False,
-    )
-
-    # TODO(mpatou): do something when remote_commit is none
-    commit = None
-    if remote_commit is not None:
-        commit = Commit(remote_commit)
+    commit = get_remote_commit(remote_branch)
 
     return (remote, BranchName(remote_branch), commit)
 
@@ -1443,6 +1447,44 @@ def cmd_adopt(stack: StackBranch, args):
         run(CmdArgs(["git", "checkout", branch]))
 
 
+def cmd_rebuild(stack: StackBranch, args):
+    config = get_config()
+    branch = args.name
+    global CURRENT_BRANCH
+
+    main_branch = get_real_stack_bottom()
+    assert main_branch is not None
+
+    target_stack: list[BranchName] = []
+    while branch != main_branch:
+        target_stack.append(branch)
+        cout(f"Getting PR info for branch {branch}\n", fg="green")
+        pr_info = get_pr_info(branch).open
+        if pr_info is None:
+            die(f"Branch {branch} has no open PR")
+        branch = BranchName(pr_info["baseRefName"])
+
+    target_stack.reverse()
+
+    cout(f"Switching to {main_branch}\n", fg="green")
+    run(CmdArgs(["git", "checkout", str(main_branch)]))
+
+    prev = main_branch
+    remote = "origin"
+    for branch in target_stack:
+        cout(f"Creating branch {branch}\n", fg="green")
+        run(CmdArgs(["git", "branch", "-f", "--no-track", branch, f"{remote}/{branch}"]))
+        set_parent(branch, prev, set_origin=True)
+        parent_commit = get_remote_commit(prev)
+        if parent_commit is None:
+            die(f"Could not find remote commit for branch {prev}")
+        set_parent_commit(branch, parent_commit)
+        prev = branch
+
+    if target_stack and config.change_to_adopted:
+        run(CmdArgs(["git", "checkout", target_stack[0]]))
+
+
 def cmd_land(stack: StackBranchSet, args):
     forest = get_current_downstack_as_forest(stack)
     assert len(forest) == 1
@@ -1657,6 +1699,11 @@ def main():
         adopt_parser = subparsers.add_parser("adopt", help="Adopt one branch")
         adopt_parser.add_argument("name", help="Branch name")
         adopt_parser.set_defaults(func=cmd_adopt)
+
+        # rebuild
+        rebuild_parser = subparsers.add_parser("rebuild", help="Rebuild one stack")
+        rebuild_parser.add_argument("name", help="Top of stack branch name")
+        rebuild_parser.set_defaults(func=cmd_rebuild)
 
         # land
         land_parser = subparsers.add_parser("land", help="Land bottom-most PR on current stack")
