@@ -333,6 +333,91 @@ class TestWorktreeSupport(unittest.TestCase):
             ]
         )
 
+    def test_rebase_branch_onto_parent_uses_branch_worktree(self):
+        cfg = stacky_module.StackyConfig(use_worktree=True)
+        parent = SimpleNamespace(name=stacky_module.BranchName("parent"))
+        branch = SimpleNamespace(
+            name=stacky_module.BranchName("child"),
+            parent=parent,
+            parent_commit=stacky_module.Commit("old-parent"),
+        )
+        with (
+            mock.patch.object(stacky_module, "get_config", return_value=cfg),
+            mock.patch.object(stacky_module, "ensure_worktree", return_value="/wt/child") as ensure_mock,
+            mock.patch.object(stacky_module, "run", return_value="ok") as run_mock,
+        ):
+            self.assertEqual(stacky_module.rebase_branch_onto_parent(branch), "ok")
+
+        ensure_mock.assert_called_once_with(stacky_module.BranchName("child"), create=False)
+        run_mock.assert_called_once_with(
+            stacky_module.CmdArgs(["git", "-C", "/wt/child", "rebase", "--onto", "parent", "old-parent"]),
+            out=True,
+            check=False,
+        )
+
+    def test_rebase_branch_onto_parent_without_worktree_rebases_named_branch(self):
+        cfg = stacky_module.StackyConfig(use_worktree=False)
+        parent = SimpleNamespace(name=stacky_module.BranchName("parent"))
+        branch = SimpleNamespace(
+            name=stacky_module.BranchName("child"),
+            parent=parent,
+            parent_commit=stacky_module.Commit("old-parent"),
+        )
+        with (
+            mock.patch.object(stacky_module, "get_config", return_value=cfg),
+            mock.patch.object(stacky_module, "ensure_worktree") as ensure_mock,
+            mock.patch.object(stacky_module, "run", return_value="ok") as run_mock,
+        ):
+            self.assertEqual(stacky_module.rebase_branch_onto_parent(branch), "ok")
+
+        ensure_mock.assert_not_called()
+        run_mock.assert_called_once_with(
+            stacky_module.CmdArgs(["git", "rebase", "--onto", "parent", "old-parent", "child"]),
+            out=True,
+            check=False,
+        )
+
+    def test_restore_sync_location_uses_current_branch_worktree(self):
+        cfg = stacky_module.StackyConfig(use_worktree=True)
+        stacky_module.CURRENT_BRANCH = stacky_module.BranchName("parent")
+        with (
+            mock.patch.object(stacky_module, "get_config", return_value=cfg),
+            mock.patch.object(stacky_module, "ensure_worktree", return_value="/wt/parent") as ensure_mock,
+            mock.patch.object(stacky_module, "run") as run_mock,
+            mock.patch.object(stacky_module.sys, "stdout", new=io.StringIO()) as out,
+        ):
+            stacky_module.restore_sync_location()
+
+        ensure_mock.assert_called_once_with(stacky_module.BranchName("parent"), create=False)
+        run_mock.assert_not_called()
+        self.assertEqual(out.getvalue(), "/wt/parent\n")
+
+    def test_restore_sync_location_without_worktree_checkouts_current_branch(self):
+        cfg = stacky_module.StackyConfig(use_worktree=False)
+        stacky_module.CURRENT_BRANCH = stacky_module.BranchName("parent")
+        with (
+            mock.patch.object(stacky_module, "get_config", return_value=cfg),
+            mock.patch.object(stacky_module, "ensure_worktree") as ensure_mock,
+            mock.patch.object(stacky_module, "run") as run_mock,
+        ):
+            stacky_module.restore_sync_location()
+
+        ensure_mock.assert_not_called()
+        run_mock.assert_called_once_with(stacky_module.CmdArgs(["git", "checkout", "parent"]))
+
+    def test_emit_conflicted_sync_location_uses_conflicted_branch_worktree(self):
+        cfg = stacky_module.StackyConfig(use_worktree=True)
+        branch = SimpleNamespace(name=stacky_module.BranchName("child"))
+        with (
+            mock.patch.object(stacky_module, "get_config", return_value=cfg),
+            mock.patch.object(stacky_module, "ensure_worktree", return_value="/wt/child") as ensure_mock,
+            mock.patch.object(stacky_module.sys, "stdout", new=io.StringIO()) as out,
+        ):
+            stacky_module.emit_conflicted_sync_location(branch)
+
+        ensure_mock.assert_called_once_with(stacky_module.BranchName("child"), create=False)
+        self.assertEqual(out.getvalue(), "/wt/child\n")
+
     def test_cmd_update_uses_selected_remote(self):
         stack = MagicMock()
         stack.bottoms = set()
