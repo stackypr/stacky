@@ -237,7 +237,7 @@ def render_shell_wrapper(function_name: str, stacky_command: str) -> str:
     return textwrap.dedent(f"""\
         {function_name}() {{
           case "$1" in
-            checkout|co|sco|up|down|update)
+            checkout|co|sco|up|down|update|sync|continue)
               ;;
             branch|b)
               case "$2" in
@@ -245,9 +245,15 @@ def render_shell_wrapper(function_name: str, stacky_command: str) -> str:
                 *) command {cmd} "$@"; return $? ;;
               esac
               ;;
-            stack)
+            stack|s)
               case "$2" in
-                checkout|co) ;;
+                checkout|co|sync) ;;
+                *) command {cmd} "$@"; return $? ;;
+              esac
+              ;;
+            upstack|us|downstack|ds)
+              case "$2" in
+                sync) ;;
                 *) command {cmd} "$@"; return $? ;;
               esac
               ;;
@@ -260,13 +266,13 @@ def render_shell_wrapper(function_name: str, stacky_command: str) -> str:
           local out rc
           out="$(command {cmd} "$@")"
           rc=$?
-          [ $rc -ne 0 ] && return $rc
 
           if [ -n "$out" ] && [ -d "$out" ]; then
             cd "$out" || return 1
           elif [ -n "$out" ]; then
             printf '%s\\n' "$out"
           fi
+          [ $rc -ne 0 ] && return $rc
         }}
         """)
 
@@ -1578,6 +1584,36 @@ def get_commits_between(a: Commit, b: Commit):
     return [x.strip() for x in lines.split("\n")]
 
 
+def rebase_branch_onto_parent(b: StackBranch) -> Optional[str]:
+    config = get_config()
+    if config.use_worktree:
+        path = ensure_worktree(b.name, create=False)
+        return run(
+            CmdArgs(["git", "-C", path, "rebase", "--onto", b.parent.name, b.parent_commit]),
+            out=True,
+            check=False,
+        )
+    return run(
+        CmdArgs(["git", "rebase", "--onto", b.parent.name, b.parent_commit, b.name]),
+        out=True,
+        check=False,
+    )
+
+
+def restore_sync_location():
+    config = get_config()
+    if config.use_worktree:
+        emit_location(ensure_worktree(CURRENT_BRANCH, create=False))
+        return
+    run(CmdArgs(["git", "checkout", str(CURRENT_BRANCH)]))
+
+
+def emit_conflicted_sync_location(b: StackBranch):
+    config = get_config()
+    if config.use_worktree:
+        emit_location(ensure_worktree(b.name, create=False))
+
+
 def inner_do_sync(syncs: List[StackBranch], sync_names: List[BranchName]):
     print(file=sys.stderr)
     while syncs:
@@ -1599,12 +1635,9 @@ def inner_do_sync(syncs: List[StackBranch], sync_names: List[BranchName]):
             )
         else:
             cout("Rebasing {} on top of {}\n", b.name, b.parent.name, fg="green")
-            r = run(
-                CmdArgs(["git", "rebase", "--onto", b.parent.name, b.parent_commit, b.name]),
-                out=True,
-                check=False,
-            )
+            r = rebase_branch_onto_parent(b)
             if r is None:
+                emit_conflicted_sync_location(b)
                 print(file=sys.stderr)
                 die(
                     "Automatic rebase failed. Please complete the rebase (fix conflicts; `git rebase --continue`), then run `stacky continue`"
@@ -1612,7 +1645,7 @@ def inner_do_sync(syncs: List[StackBranch], sync_names: List[BranchName]):
             b.commit = get_commit(b.name)
         set_parent_commit(b.name, b.parent.commit, b.parent_commit)
         b.parent_commit = b.parent.commit
-    run(CmdArgs(["git", "checkout", str(CURRENT_BRANCH)]))
+    restore_sync_location()
 
 
 def cmd_stack_sync(stack: StackBranchSet, args):
@@ -2440,8 +2473,9 @@ def main():
                     state = json.load(f)
             except FileNotFoundError as e:  # noqa: F841
                 die("No previous command in progress")
-            branch = state["branch"]
-            run(["git", "checkout", branch])
+            branch = BranchName(state["branch"])
+            if not config.use_worktree:
+                run(CmdArgs(["git", "checkout", branch]))
             CURRENT_BRANCH = branch
             if CURRENT_BRANCH not in stack.stack:
                 die("Current branch {} is not in a stack", CURRENT_BRANCH)
