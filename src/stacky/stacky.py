@@ -1475,9 +1475,7 @@ def cmd_rebuild(stack: StackBranch, args):
         cout(f"Creating branch {branch}\n", fg="green")
         run(CmdArgs(["git", "branch", "-f", "--no-track", branch, f"{remote}/{branch}"]))
         set_parent(branch, prev, set_origin=True)
-        parent_commit = get_remote_commit(prev)
-        if parent_commit is None:
-            die(f"Could not find remote commit for branch {prev}")
+        parent_commit = get_merge_base(branch, prev)
         set_parent_commit(branch, parent_commit)
         prev = branch
 
