@@ -58,6 +58,39 @@ class TestStringMethods(unittest.TestCase):
         self.assertTrue(out is None)
 
 
+class TestInit(unittest.TestCase):
+    def test_init_git_does_not_check_gh_auth(self):
+        calls = []
+
+        def fake_run(cmd, check=True):  # noqa: ARG001
+            calls.append(cmd)
+            if cmd == ["git", "config", "remote.pushDefault"]:
+                return None
+            if cmd == ["git", "symbolic-ref", "-q", "HEAD"]:
+                return "refs/heads/main"
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        with mock.patch.object(stacky_module, "run", side_effect=fake_run):
+            stacky_module.init_git()
+
+        self.assertNotIn(["gh", "auth", "status"], calls)
+        self.assertEqual(stacky_module.CURRENT_BRANCH, "main")
+
+    def test_init_gh_checks_auth(self):
+        with mock.patch.object(stacky_module, "run", return_value="ok") as run_mock:
+            stacky_module.init_gh()
+
+        run_mock.assert_called_once_with(["gh", "auth", "status"], check=False)
+
+    def test_args_need_gh_for_pr_and_github_commands(self):
+        self.assertFalse(stacky_module.args_need_gh(Namespace(command="info", pr=False)))
+        self.assertTrue(stacky_module.args_need_gh(Namespace(command="info", pr=True)))
+        self.assertFalse(stacky_module.args_need_gh(Namespace(command="sync")))
+
+        for command in ("update", "import", "rebuild", "land"):
+            self.assertTrue(stacky_module.args_need_gh(Namespace(command=command)))
+
+
 class TestWorktreeSupport(unittest.TestCase):
     def test_parse_worktree_list(self):
         out = (
