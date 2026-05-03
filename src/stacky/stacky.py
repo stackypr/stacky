@@ -474,6 +474,15 @@ def _check_returncode(sp: subprocess.CompletedProcess, cmd: CmdArgs):
         die("Exited with status {}: {}. Stderr was:\n{}", rc, shlex.join(cmd), stderr)
 
 
+def _existing_worktree_from_git_error(stderr: str, branch: BranchName) -> Optional[str]:
+    match = re.search(r"fatal: '([^']+)' is already (?:used by worktree|checked out) at '([^']+)'", stderr)
+    if match is None:
+        return None
+    if match.group(1) != str(branch):
+        return None
+    return match.group(2)
+
+
 def run_multiline(cmd: CmdArgs, *, check: bool = True, null: bool = True, out: bool = False) -> Optional[str]:
     debug("Running: {}", shlex.join(cmd))
     sys.stdout.flush()
@@ -1093,6 +1102,25 @@ def _list_spare_worktree_paths(root: str, entries: List[WorktreeEntry]) -> List[
     return spares
 
 
+def _run_worktree_branch_command(cmd: CmdArgs, branch: BranchName) -> Optional[str]:
+    debug("Running: {}", shlex.join(cmd))
+    sys.stdout.flush()
+    sys.stderr.flush()
+    sp = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if sp.returncode == 0:
+        return None
+    stderr = sp.stderr.decode("UTF-8")
+    existing_path = _existing_worktree_from_git_error(stderr, branch)
+    if existing_path is not None:
+        return existing_path
+    _check_returncode(sp, cmd)
+    return None
+
+
 def ensure_worktree(branch: BranchName, *, create: bool, base: Optional[BranchName] = None) -> str:
     entries = get_worktree_entries()
     existing_path = next((entry.path for entry in entries if entry.branch == branch), None)
@@ -1110,7 +1138,11 @@ def ensure_worktree(branch: BranchName, *, create: bool, base: Optional[BranchNa
                 die("Cannot create worktree branch from a detached HEAD")
             run(CmdArgs(["git", "-C", spare_path, "checkout", "-b", str(branch), str(base)]))
         else:
-            run(CmdArgs(["git", "-C", spare_path, "checkout", str(branch)]))
+            existing_path = _run_worktree_branch_command(
+                CmdArgs(["git", "-C", spare_path, "checkout", str(branch)]), branch
+            )
+            if existing_path is not None:
+                return existing_path
         return spare_path
 
     path = _next_worktree_pool_path(root, [entry.path for entry in entries])
@@ -1122,7 +1154,9 @@ def ensure_worktree(branch: BranchName, *, create: bool, base: Optional[BranchNa
             die("Cannot create worktree branch from a detached HEAD")
         run(CmdArgs(["git", "worktree", "add", "-b", str(branch), path, str(base)]))
     else:
-        run(CmdArgs(["git", "worktree", "add", path, str(branch)]))
+        existing_path = _run_worktree_branch_command(CmdArgs(["git", "worktree", "add", path, str(branch)]), branch)
+        if existing_path is not None:
+            return existing_path
     return path
 
 
