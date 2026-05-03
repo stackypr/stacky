@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import io
 import os
+import subprocess
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -110,11 +111,15 @@ class TestWorktreeSupport(unittest.TestCase):
         cfg = stacky_module.StackyConfig(use_worktree=True)
         cfg.worktree_root = ".stacky/worktrees"
         stacky_module.TOP_LEVEL_DIR = "/repo"
-        with mock.patch.object(stacky_module, "get_config", return_value=cfg):
+        with (
+            mock.patch.object(stacky_module, "get_config", return_value=cfg),
+            mock.patch.object(stacky_module, "_run_worktree_branch_command", return_value=None) as worktree_cmd_mock,
+        ):
             path = stacky_module.ensure_worktree(stacky_module.BranchName("feature"), create=False)
         self.assertEqual(path, "/repo/.stacky/worktrees/checkout-1")
-        run_mock.assert_called_with(
-            stacky_module.CmdArgs(["git", "worktree", "add", "/repo/.stacky/worktrees/checkout-1", "feature"])
+        worktree_cmd_mock.assert_called_once_with(
+            stacky_module.CmdArgs(["git", "worktree", "add", "/repo/.stacky/worktrees/checkout-1", "feature"]),
+            stacky_module.BranchName("feature"),
         )
 
     @mock.patch.object(stacky_module, "run")
@@ -136,12 +141,57 @@ class TestWorktreeSupport(unittest.TestCase):
         cfg = stacky_module.StackyConfig(use_worktree=True)
         cfg.worktree_root = ".stacky/worktrees"
         stacky_module.TOP_LEVEL_DIR = "/repo"
-        with mock.patch.object(stacky_module, "get_config", return_value=cfg):
+        with (
+            mock.patch.object(stacky_module, "get_config", return_value=cfg),
+            mock.patch.object(stacky_module, "_run_worktree_branch_command", return_value=None) as worktree_cmd_mock,
+        ):
             path = stacky_module.ensure_worktree(stacky_module.BranchName("feature"), create=False)
         self.assertEqual(path, "/repo/.stacky/worktrees/checkout-2")
-        run_mock.assert_called_with(
-            stacky_module.CmdArgs(["git", "-C", "/repo/.stacky/worktrees/checkout-2", "checkout", "feature"])
+        worktree_cmd_mock.assert_called_once_with(
+            stacky_module.CmdArgs(["git", "-C", "/repo/.stacky/worktrees/checkout-2", "checkout", "feature"]),
+            stacky_module.BranchName("feature"),
         )
+
+    @mock.patch.object(
+        stacky_module,
+        "run_multiline",
+        return_value=(
+            "worktree /repo\n"
+            "HEAD abc\n"
+            "branch refs/heads/main\n"
+            "\n"
+            "worktree /repo/.stacky/worktrees/checkout-2\n"
+            "HEAD def\n"
+            "detached\n"
+        ),
+    )
+    @mock.patch.object(stacky_module.os, "makedirs")
+    def test_ensure_worktree_returns_existing_path_from_checkout_error(self, makedirs_mock, run_multiline_mock):
+        cfg = stacky_module.StackyConfig(use_worktree=True)
+        cfg.worktree_root = ".stacky/worktrees"
+        stacky_module.TOP_LEVEL_DIR = "/repo"
+        with (
+            mock.patch.object(stacky_module, "get_config", return_value=cfg),
+            mock.patch.object(
+                stacky_module, "_run_worktree_branch_command", return_value="/repo/.stacky/worktrees/checkout-6"
+            ),
+        ):
+            path = stacky_module.ensure_worktree(stacky_module.BranchName("feature"), create=False)
+        self.assertEqual(path, "/repo/.stacky/worktrees/checkout-6")
+
+    @mock.patch.object(stacky_module.subprocess, "run")
+    def test_run_worktree_branch_command_returns_existing_worktree_from_git_error(self, subprocess_run_mock):
+        subprocess_run_mock.return_value = subprocess.CompletedProcess(
+            args=["git", "-C", "/repo/.stacky/worktrees/checkout-2", "checkout", "feature"],
+            returncode=128,
+            stdout=b"",
+            stderr=b"fatal: 'feature' is already used by worktree at '/repo/.stacky/worktrees/checkout-6'\n",
+        )
+        path = stacky_module._run_worktree_branch_command(
+            stacky_module.CmdArgs(["git", "-C", "/repo/.stacky/worktrees/checkout-2", "checkout", "feature"]),
+            stacky_module.BranchName("feature"),
+        )
+        self.assertEqual(path, "/repo/.stacky/worktrees/checkout-6")
 
     def test_get_worktree_root_uses_repo_top_level(self):
         cfg = stacky_module.StackyConfig(use_worktree=True, worktree_root=".stacky/worktrees")
