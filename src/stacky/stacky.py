@@ -921,11 +921,20 @@ def init_git():
     push_default = run(["git", "config", "remote.pushDefault"], check=False)
     if push_default is not None:
         die("`git config remote.pushDefault` may not be set")
+    global CURRENT_BRANCH
+    CURRENT_BRANCH = get_current_branch()
+
+
+def init_gh():
     auth_status = run(["gh", "auth", "status"], check=False)
     if auth_status is None:
         die("`gh` authentication failed")
-    global CURRENT_BRANCH
-    CURRENT_BRANCH = get_current_branch()
+
+
+def args_need_gh(args) -> bool:
+    if getattr(args, "pr", False):
+        return True
+    return args.command in ("update", "import", "rebuild", "land")
 
 
 def forest_depth_first(
@@ -1957,7 +1966,9 @@ def reset_checked_out_branch(branch: BranchName, worktree_map: Dict[BranchName, 
         run(_worktree_git_cmd(path, ["reset", "--hard", "HEAD"]))
 
 
-def update_bottom_branch(remote: str, branch: BranchName, remote_branch: BranchName, worktree_map: Dict[BranchName, str]):
+def update_bottom_branch(
+    remote: str, branch: BranchName, remote_branch: BranchName, worktree_map: Dict[BranchName, str]
+):
     stashed = stash_checked_out_branch_changes(branch, worktree_map)
     run(
         CmdArgs(
@@ -2512,6 +2523,8 @@ def main():
             COLOR_STDOUT = False
 
         init_git()
+        if args_need_gh(args):
+            init_gh()
 
         stack = StackBranchSet()
         load_all_stacks(stack)
