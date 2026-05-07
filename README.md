@@ -170,6 +170,7 @@ In the file you have sections and each sections define some parameters.
 
 We currently have the following sections:
  * UI
+ * command
 
 List of parameters for each sections:
 
@@ -181,6 +182,19 @@ List of parameters for each sections:
  * remote_name: string with a default value of `origin`, sets the default git remote used by commands such as `push` and `update`. You can still override it per command with `--remote-name` / `-r`.
  * use_worktree: boolean with a default value of `False`, when set to `True` branch checkout and branch creation use dedicated git worktrees.
  * worktree_root: string with a default value of `.stacky/worktrees`, controls where stacky stores managed worktrees.
+
+### command
+
+Override command prefixes used by Stacky. Each key is the command prefix Stacky would normally run, and each value is the replacement prefix. Stacky appends any remaining arguments from the original command.
+
+For example:
+
+```ini
+[command]
+git fetch = git cache fetch
+```
+
+With this config, a Stacky call that would normally run `git fetch origin` runs `git cache fetch origin` instead. Without an entry, commands use their normal defaults.
 
 ## Shell wrapper for worktree auto-cd
 

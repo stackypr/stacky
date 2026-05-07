@@ -10,7 +10,7 @@ from unittest import mock
 from unittest.mock import MagicMock
 
 import stacky.stacky as stacky_module
-from stacky import PRInfos, find_issue_marker, read_config
+from stacky import find_issue_marker
 
 
 class TestStringMethods(unittest.TestCase):
@@ -83,7 +83,9 @@ class TestInit(unittest.TestCase):
         run_mock.assert_called_once_with(["gh", "auth", "status"], check=False)
 
     def test_args_need_gh_for_pr_and_github_commands(self):
-        self.assertFalse(stacky_module.args_need_gh(Namespace(command="info", pr=False)))
+        self.assertFalse(
+            stacky_module.args_need_gh(Namespace(command="info", pr=False))
+        )
         self.assertTrue(stacky_module.args_need_gh(Namespace(command="info", pr=True)))
         self.assertFalse(stacky_module.args_need_gh(Namespace(command="sync")))
 
@@ -104,7 +106,10 @@ class TestWorktreeSupport(unittest.TestCase):
         )
         parsed = stacky_module._parse_worktree_list(out)
         self.assertEqual(parsed[stacky_module.BranchName("main")], "/repo")
-        self.assertEqual(parsed[stacky_module.BranchName("feature")], "/repo/.stacky/worktrees/feature")
+        self.assertEqual(
+            parsed[stacky_module.BranchName("feature")],
+            "/repo/.stacky/worktrees/feature",
+        )
 
     def test_read_one_config_use_worktree(self):
         cfg = stacky_module.StackyConfig()
@@ -130,114 +135,251 @@ class TestWorktreeSupport(unittest.TestCase):
         self.assertEqual(cfg.remote_name, "upstream")
 
     def test_get_gh_repo_parses_https_remote(self):
-        with mock.patch.object(stacky_module, "run", side_effect=[None, "https://github.com/org/repo.git"]):
+        with mock.patch.object(
+            stacky_module, "run", side_effect=[None, "https://github.com/org/repo.git"]
+        ):
             self.assertEqual(stacky_module.get_gh_repo("upstream"), "org/repo")
 
     def test_get_gh_repo_parses_ssh_remote(self):
-        with mock.patch.object(stacky_module, "run", side_effect=[None, "git@github.com:org/repo.git"]):
+        with mock.patch.object(
+            stacky_module, "run", side_effect=[None, "git@github.com:org/repo.git"]
+        ):
             self.assertEqual(stacky_module.get_gh_repo("upstream"), "org/repo")
+
+    def test_read_one_config_command_override(self):
+        cfg = stacky_module.StackyConfig()
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write("[command]\ngit fetch = git cache fetch\n")
+            path = f.name
+        try:
+            cfg.read_one_config(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(
+            cfg.command_overrides[("git", "fetch")], ["git", "cache", "fetch"]
+        )
+        self.assertEqual(cfg.command_override_sources[("git", "fetch")], path)
+        self.assertEqual(cfg.config_paths_read, [path])
+
+    def test_cmd_debug_config_prints_paths_and_command_overrides(self):
+        cfg = stacky_module.StackyConfig(
+            command_overrides={("git", "fetch"): ["git", "cache", "fetch"]},
+            command_override_sources={("git", "fetch"): "/repo/.stackyconfig"},
+            config_paths_checked=["/repo/.stackyconfig", "/home/user/.stackyconfig"],
+            config_paths_read=["/repo/.stackyconfig"],
+        )
+        stacky_module.TOP_LEVEL_DIR = "/repo/subdir"
+        stacky_module.REPO_TOP_LEVEL_DIR = "/repo"
+        with (
+            mock.patch.object(stacky_module, "get_config", return_value=cfg),
+            mock.patch.object(
+                stacky_module.sys, "stdout", new_callable=io.StringIO
+            ) as stdout_mock,
+        ):
+            stacky_module.cmd_debug_config(Namespace())
+        out = stdout_mock.getvalue()
+        self.assertIn("top_level_dir = /repo/subdir", out)
+        self.assertIn("repo_top_level_dir = /repo", out)
+        self.assertIn("[read] /repo/.stackyconfig", out)
+        self.assertIn("[missing] /home/user/.stackyconfig", out)
+        self.assertIn("git fetch = git cache fetch  # from /repo/.stackyconfig", out)
+
+    def test_resolve_command_uses_longest_matching_override(self):
+        cfg = stacky_module.StackyConfig(
+            command_overrides={
+                ("git",): ["mygit"],
+                ("git", "fetch"): ["git", "cache", "fetch"],
+            }
+        )
+        self.assertEqual(
+            cfg.resolve_command(stacky_module.CmdArgs(["git", "fetch", "origin"])),
+            ["git", "cache", "fetch", "origin"],
+        )
+        self.assertEqual(
+            cfg.resolve_command(
+                stacky_module.CmdArgs(["git", "push", "origin", "main"])
+            ),
+            ["mygit", "push", "origin", "main"],
+        )
+
+    @mock.patch.object(stacky_module.subprocess, "run")
+    def test_run_multiline_uses_command_override(self, subprocess_run_mock):
+        subprocess_run_mock.return_value = subprocess.CompletedProcess(
+            args=["git", "cache", "fetch", "origin"],
+            returncode=0,
+            stdout=b"",
+            stderr=b"",
+        )
+        cfg = stacky_module.StackyConfig(
+            command_overrides={("git", "fetch"): ["git", "cache", "fetch"]}
+        )
+        with mock.patch.object(stacky_module, "CONFIG", cfg):
+            stacky_module.run_multiline(
+                stacky_module.CmdArgs(["git", "fetch", "origin"])
+            )
+        subprocess_run_mock.assert_called_once_with(
+            ["git", "cache", "fetch", "origin"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
 
     @mock.patch.object(stacky_module, "run")
     @mock.patch.object(stacky_module, "run_multiline", return_value="")
     @mock.patch.object(stacky_module.os, "makedirs")
-    def test_ensure_worktree_creates_new(self, makedirs_mock, run_multiline_mock, run_mock):
-        cfg = stacky_module.StackyConfig(use_worktree=True)
-        cfg.worktree_root = ".stacky/worktrees"
-        stacky_module.TOP_LEVEL_DIR = "/repo"
-        with (
-            mock.patch.object(stacky_module, "get_config", return_value=cfg),
-            mock.patch.object(stacky_module, "_run_worktree_branch_command", return_value=None) as worktree_cmd_mock,
-        ):
-            path = stacky_module.ensure_worktree(stacky_module.BranchName("feature"), create=False)
-        self.assertEqual(path, "/repo/.stacky/worktrees/checkout-1")
-        worktree_cmd_mock.assert_called_once_with(
-            stacky_module.CmdArgs(["git", "worktree", "add", "/repo/.stacky/worktrees/checkout-1", "feature"]),
-            stacky_module.BranchName("feature"),
-        )
-
-    @mock.patch.object(stacky_module, "run")
-    @mock.patch.object(
-        stacky_module,
-        "run_multiline",
-        return_value=(
-            "worktree /repo\n"
-            "HEAD abc\n"
-            "branch refs/heads/main\n"
-            "\n"
-            "worktree /repo/.stacky/worktrees/checkout-2\n"
-            "HEAD def\n"
-            "detached\n"
-        ),
-    )
-    @mock.patch.object(stacky_module.os, "makedirs")
-    def test_ensure_worktree_reuses_spare_checkout(self, makedirs_mock, run_multiline_mock, run_mock):
-        cfg = stacky_module.StackyConfig(use_worktree=True)
-        cfg.worktree_root = ".stacky/worktrees"
-        stacky_module.TOP_LEVEL_DIR = "/repo"
-        with (
-            mock.patch.object(stacky_module, "get_config", return_value=cfg),
-            mock.patch.object(stacky_module, "_run_worktree_branch_command", return_value=None) as worktree_cmd_mock,
-        ):
-            path = stacky_module.ensure_worktree(stacky_module.BranchName("feature"), create=False)
-        self.assertEqual(path, "/repo/.stacky/worktrees/checkout-2")
-        worktree_cmd_mock.assert_called_once_with(
-            stacky_module.CmdArgs(["git", "-C", "/repo/.stacky/worktrees/checkout-2", "checkout", "feature"]),
-            stacky_module.BranchName("feature"),
-        )
-
-    @mock.patch.object(
-        stacky_module,
-        "run_multiline",
-        return_value=(
-            "worktree /repo\n"
-            "HEAD abc\n"
-            "branch refs/heads/main\n"
-            "\n"
-            "worktree /repo/.stacky/worktrees/checkout-2\n"
-            "HEAD def\n"
-            "detached\n"
-        ),
-    )
-    @mock.patch.object(stacky_module.os, "makedirs")
-    def test_ensure_worktree_returns_existing_path_from_checkout_error(self, makedirs_mock, run_multiline_mock):
+    def test_ensure_worktree_creates_new(
+        self, makedirs_mock, run_multiline_mock, run_mock
+    ):
         cfg = stacky_module.StackyConfig(use_worktree=True)
         cfg.worktree_root = ".stacky/worktrees"
         stacky_module.TOP_LEVEL_DIR = "/repo"
         with (
             mock.patch.object(stacky_module, "get_config", return_value=cfg),
             mock.patch.object(
-                stacky_module, "_run_worktree_branch_command", return_value="/repo/.stacky/worktrees/checkout-6"
+                stacky_module, "_run_worktree_branch_command", return_value=None
+            ) as worktree_cmd_mock,
+        ):
+            path = stacky_module.ensure_worktree(
+                stacky_module.BranchName("feature"), create=False
+            )
+        self.assertEqual(path, "/repo/.stacky/worktrees/checkout-1")
+        worktree_cmd_mock.assert_called_once_with(
+            stacky_module.CmdArgs(
+                [
+                    "git",
+                    "worktree",
+                    "add",
+                    "/repo/.stacky/worktrees/checkout-1",
+                    "feature",
+                ]
+            ),
+            stacky_module.BranchName("feature"),
+        )
+
+    @mock.patch.object(stacky_module, "run")
+    @mock.patch.object(
+        stacky_module,
+        "run_multiline",
+        return_value=(
+            "worktree /repo\n"
+            "HEAD abc\n"
+            "branch refs/heads/main\n"
+            "\n"
+            "worktree /repo/.stacky/worktrees/checkout-2\n"
+            "HEAD def\n"
+            "detached\n"
+        ),
+    )
+    @mock.patch.object(stacky_module.os, "makedirs")
+    def test_ensure_worktree_reuses_spare_checkout(
+        self, makedirs_mock, run_multiline_mock, run_mock
+    ):
+        cfg = stacky_module.StackyConfig(use_worktree=True)
+        cfg.worktree_root = ".stacky/worktrees"
+        stacky_module.TOP_LEVEL_DIR = "/repo"
+        with (
+            mock.patch.object(stacky_module, "get_config", return_value=cfg),
+            mock.patch.object(
+                stacky_module, "_run_worktree_branch_command", return_value=None
+            ) as worktree_cmd_mock,
+        ):
+            path = stacky_module.ensure_worktree(
+                stacky_module.BranchName("feature"), create=False
+            )
+        self.assertEqual(path, "/repo/.stacky/worktrees/checkout-2")
+        worktree_cmd_mock.assert_called_once_with(
+            stacky_module.CmdArgs(
+                [
+                    "git",
+                    "-C",
+                    "/repo/.stacky/worktrees/checkout-2",
+                    "checkout",
+                    "feature",
+                ]
+            ),
+            stacky_module.BranchName("feature"),
+        )
+
+    @mock.patch.object(
+        stacky_module,
+        "run_multiline",
+        return_value=(
+            "worktree /repo\n"
+            "HEAD abc\n"
+            "branch refs/heads/main\n"
+            "\n"
+            "worktree /repo/.stacky/worktrees/checkout-2\n"
+            "HEAD def\n"
+            "detached\n"
+        ),
+    )
+    @mock.patch.object(stacky_module.os, "makedirs")
+    def test_ensure_worktree_returns_existing_path_from_checkout_error(
+        self, makedirs_mock, run_multiline_mock
+    ):
+        cfg = stacky_module.StackyConfig(use_worktree=True)
+        cfg.worktree_root = ".stacky/worktrees"
+        stacky_module.TOP_LEVEL_DIR = "/repo"
+        with (
+            mock.patch.object(stacky_module, "get_config", return_value=cfg),
+            mock.patch.object(
+                stacky_module,
+                "_run_worktree_branch_command",
+                return_value="/repo/.stacky/worktrees/checkout-6",
             ),
         ):
-            path = stacky_module.ensure_worktree(stacky_module.BranchName("feature"), create=False)
+            path = stacky_module.ensure_worktree(
+                stacky_module.BranchName("feature"), create=False
+            )
         self.assertEqual(path, "/repo/.stacky/worktrees/checkout-6")
 
     @mock.patch.object(stacky_module.subprocess, "run")
-    def test_run_worktree_branch_command_returns_existing_worktree_from_git_error(self, subprocess_run_mock):
+    def test_run_worktree_branch_command_returns_existing_worktree_from_git_error(
+        self, subprocess_run_mock
+    ):
         subprocess_run_mock.return_value = subprocess.CompletedProcess(
-            args=["git", "-C", "/repo/.stacky/worktrees/checkout-2", "checkout", "feature"],
+            args=[
+                "git",
+                "-C",
+                "/repo/.stacky/worktrees/checkout-2",
+                "checkout",
+                "feature",
+            ],
             returncode=128,
             stdout=b"",
             stderr=b"fatal: 'feature' is already used by worktree at '/repo/.stacky/worktrees/checkout-6'\n",
         )
         path = stacky_module._run_worktree_branch_command(
-            stacky_module.CmdArgs(["git", "-C", "/repo/.stacky/worktrees/checkout-2", "checkout", "feature"]),
+            stacky_module.CmdArgs(
+                [
+                    "git",
+                    "-C",
+                    "/repo/.stacky/worktrees/checkout-2",
+                    "checkout",
+                    "feature",
+                ]
+            ),
             stacky_module.BranchName("feature"),
         )
         self.assertEqual(path, "/repo/.stacky/worktrees/checkout-6")
 
     def test_get_worktree_root_uses_repo_top_level(self):
-        cfg = stacky_module.StackyConfig(use_worktree=True, worktree_root=".stacky/worktrees")
+        cfg = stacky_module.StackyConfig(
+            use_worktree=True, worktree_root=".stacky/worktrees"
+        )
         stacky_module.TOP_LEVEL_DIR = "/repo/.stacky/worktrees/dev__test"
         stacky_module.REPO_TOP_LEVEL_DIR = "/repo"
         with mock.patch.object(stacky_module, "get_config", return_value=cfg):
-            self.assertEqual(stacky_module.get_worktree_root(), "/repo/.stacky/worktrees")
+            self.assertEqual(
+                stacky_module.get_worktree_root(), "/repo/.stacky/worktrees"
+            )
 
     def test_checkout_emits_worktree_location(self):
         cfg = stacky_module.StackyConfig(use_worktree=True)
         with (
             mock.patch.object(stacky_module, "get_config", return_value=cfg),
-            mock.patch.object(stacky_module, "ensure_worktree", return_value="/wt/feature"),
+            mock.patch.object(
+                stacky_module, "ensure_worktree", return_value="/wt/feature"
+            ),
             mock.patch.object(stacky_module.sys, "stdout", new=io.StringIO()) as out,
         ):
             stacky_module.checkout(stacky_module.BranchName("feature"))
@@ -248,7 +390,9 @@ class TestWorktreeSupport(unittest.TestCase):
         stacky_module.CURRENT_BRANCH = stacky_module.BranchName("main")
         with (
             mock.patch.object(stacky_module, "get_config", return_value=cfg),
-            mock.patch.object(stacky_module, "ensure_worktree", return_value="/wt/feature"),
+            mock.patch.object(
+                stacky_module, "ensure_worktree", return_value="/wt/feature"
+            ),
             mock.patch.object(stacky_module, "set_parent") as set_parent_mock,
             mock.patch.object(stacky_module, "emit_location") as emit_location_mock,
         ):
@@ -266,11 +410,17 @@ class TestWorktreeSupport(unittest.TestCase):
         args = Namespace(name=stacky_module.BranchName("topic"))
         with (
             mock.patch.object(stacky_module, "get_config", return_value=cfg),
-            mock.patch.object(stacky_module, "get_real_stack_bottom", return_value=stacky_module.BranchName("main")),
+            mock.patch.object(
+                stacky_module,
+                "get_real_stack_bottom",
+                return_value=stacky_module.BranchName("main"),
+            ),
             mock.patch.object(stacky_module, "run") as run_mock,
             mock.patch.object(stacky_module, "get_merge_base", return_value="abc123"),
             mock.patch.object(stacky_module, "set_parent") as set_parent_mock,
-            mock.patch.object(stacky_module, "set_parent_commit") as set_parent_commit_mock,
+            mock.patch.object(
+                stacky_module, "set_parent_commit"
+            ) as set_parent_commit_mock,
         ):
             stacky_module.cmd_adopt(MagicMock(), args)
         run_mock.assert_not_called()
@@ -279,7 +429,9 @@ class TestWorktreeSupport(unittest.TestCase):
             stacky_module.BranchName("main"),
             set_origin=True,
         )
-        set_parent_commit_mock.assert_called_once_with(stacky_module.BranchName("topic"), "abc123")
+        set_parent_commit_mock.assert_called_once_with(
+            stacky_module.BranchName("topic"), "abc123"
+        )
 
     def test_load_stack_for_given_branch_recovers_missing_parent(self):
         stack = MagicMock()
@@ -288,10 +440,18 @@ class TestWorktreeSupport(unittest.TestCase):
         stack.add.side_effect = [bottom, child]
 
         with (
-            mock.patch.object(stacky_module, "get_stack_parent_branch", return_value=None),
-            mock.patch.object(stacky_module, "get_stack_parent_commit", return_value=stacky_module.Commit("abc123")),
             mock.patch.object(
-                stacky_module, "infer_stack_parent_branch", return_value=stacky_module.BranchName("main")
+                stacky_module, "get_stack_parent_branch", return_value=None
+            ),
+            mock.patch.object(
+                stacky_module,
+                "get_stack_parent_commit",
+                return_value=stacky_module.Commit("abc123"),
+            ),
+            mock.patch.object(
+                stacky_module,
+                "infer_stack_parent_branch",
+                return_value=stacky_module.BranchName("main"),
             ),
             mock.patch.object(stacky_module, "set_parent") as set_parent_mock,
         ):
@@ -300,7 +460,10 @@ class TestWorktreeSupport(unittest.TestCase):
             )
 
         self.assertIsNotNone(top)
-        self.assertEqual(branches, [stacky_module.BranchName("feature"), stacky_module.BranchName("main")])
+        self.assertEqual(
+            branches,
+            [stacky_module.BranchName("feature"), stacky_module.BranchName("main")],
+        )
         set_parent_mock.assert_called_once_with(
             stacky_module.BranchName("feature"),
             stacky_module.BranchName("main"),
@@ -325,17 +488,23 @@ class TestWorktreeSupport(unittest.TestCase):
 
         with (
             mock.patch.object(stacky_module, "get_config", return_value=cfg),
-            mock.patch.object(stacky_module, "ensure_worktree", return_value="/wt/main") as ensure_mock,
+            mock.patch.object(
+                stacky_module, "ensure_worktree", return_value="/wt/main"
+            ) as ensure_mock,
             mock.patch.object(stacky_module, "emit_location") as emit_mock,
             mock.patch.object(stacky_module, "run") as run_mock,
         ):
             stacky_module.delete_branches(stack, [branch])
 
-        ensure_mock.assert_called_once_with(stacky_module.BranchName("main"), create=False)
+        ensure_mock.assert_called_once_with(
+            stacky_module.BranchName("main"), create=False
+        )
         emit_mock.assert_called_once_with("/wt/main")
         run_mock.assert_has_calls(
             [
-                mock.call(stacky_module.CmdArgs(["git", "-C", "/wt/main", "checkout", "main"])),
+                mock.call(
+                    stacky_module.CmdArgs(["git", "-C", "/wt/main", "checkout", "main"])
+                ),
                 mock.call(stacky_module.CmdArgs(["git", "checkout", "--detach"])),
                 mock.call(stacky_module.CmdArgs(["git", "branch", "-D", "feature"])),
             ]
@@ -343,25 +512,47 @@ class TestWorktreeSupport(unittest.TestCase):
         self.assertEqual(stacky_module.CURRENT_BRANCH, stacky_module.BranchName("main"))
 
     def test_cmd_worktree_gc_removes_excess_spares(self):
-        cfg = stacky_module.StackyConfig(use_worktree=True, worktree_root=".stacky/worktrees")
+        cfg = stacky_module.StackyConfig(
+            use_worktree=True, worktree_root=".stacky/worktrees"
+        )
         args = Namespace(max_spares=1)
         entries = [
-            stacky_module.WorktreeEntry(path="/repo/.stacky/worktrees/checkout-1", branch=None),
-            stacky_module.WorktreeEntry(path="/repo/.stacky/worktrees/checkout-2", branch=None),
             stacky_module.WorktreeEntry(
-                path="/repo/.stacky/worktrees/checkout-3", branch=stacky_module.BranchName("feature")
+                path="/repo/.stacky/worktrees/checkout-1", branch=None
+            ),
+            stacky_module.WorktreeEntry(
+                path="/repo/.stacky/worktrees/checkout-2", branch=None
+            ),
+            stacky_module.WorktreeEntry(
+                path="/repo/.stacky/worktrees/checkout-3",
+                branch=stacky_module.BranchName("feature"),
             ),
         ]
         with (
             mock.patch.object(stacky_module, "get_config", return_value=cfg),
-            mock.patch.object(stacky_module, "get_worktree_root", return_value="/repo/.stacky/worktrees"),
-            mock.patch.object(stacky_module, "get_worktree_entries", return_value=entries),
+            mock.patch.object(
+                stacky_module,
+                "get_worktree_root",
+                return_value="/repo/.stacky/worktrees",
+            ),
+            mock.patch.object(
+                stacky_module, "get_worktree_entries", return_value=entries
+            ),
             mock.patch.object(stacky_module, "run") as run_mock,
         ):
             stacky_module.cmd_worktree_gc(MagicMock(), args)
         run_mock.assert_has_calls(
             [
-                mock.call(stacky_module.CmdArgs(["git", "worktree", "remove", "/repo/.stacky/worktrees/checkout-2"])),
+                mock.call(
+                    stacky_module.CmdArgs(
+                        [
+                            "git",
+                            "worktree",
+                            "remove",
+                            "/repo/.stacky/worktrees/checkout-2",
+                        ]
+                    )
+                ),
                 mock.call(stacky_module.CmdArgs(["git", "worktree", "prune"])),
             ]
         )
@@ -373,17 +564,27 @@ class TestWorktreeSupport(unittest.TestCase):
                 {stacky_module.BranchName("main"): "/wt/main"},
             )
 
-        run_mock.assert_called_once_with(stacky_module.CmdArgs(["git", "-C", "/wt/main", "reset", "--hard", "HEAD"]))
+        run_mock.assert_called_once_with(
+            stacky_module.CmdArgs(["git", "-C", "/wt/main", "reset", "--hard", "HEAD"])
+        )
 
-    def test_reset_checked_out_branch_uses_current_worktree_without_branch_worktree(self):
+    def test_reset_checked_out_branch_uses_current_worktree_without_branch_worktree(
+        self,
+    ):
         stacky_module.CURRENT_BRANCH = stacky_module.BranchName("main")
         with mock.patch.object(stacky_module, "run") as run_mock:
             stacky_module.reset_checked_out_branch(stacky_module.BranchName("main"), {})
 
-        run_mock.assert_called_once_with(stacky_module.CmdArgs(["git", "reset", "--hard", "HEAD"]))
+        run_mock.assert_called_once_with(
+            stacky_module.CmdArgs(["git", "reset", "--hard", "HEAD"])
+        )
 
     def test_update_bottom_branch_stashes_and_restores_worktree_changes(self):
-        with mock.patch.object(stacky_module, "run", side_effect=[" M file.txt", None, None, None, None, None]) as run_mock:
+        with mock.patch.object(
+            stacky_module,
+            "run",
+            side_effect=[" M file.txt", None, None, None, None, None],
+        ) as run_mock:
             stacky_module.update_bottom_branch(
                 "upstream",
                 stacky_module.BranchName("main"),
@@ -395,7 +596,14 @@ class TestWorktreeSupport(unittest.TestCase):
             [
                 mock.call(
                     stacky_module.CmdArgs(
-                        ["git", "-C", "/wt/main", "status", "--porcelain", "--untracked-files=all"]
+                        [
+                            "git",
+                            "-C",
+                            "/wt/main",
+                            "status",
+                            "--porcelain",
+                            "--untracked-files=all",
+                        ]
                     )
                 ),
                 mock.call(
@@ -414,12 +622,37 @@ class TestWorktreeSupport(unittest.TestCase):
                 ),
                 mock.call(
                     stacky_module.CmdArgs(
-                        ["git", "update-ref", "refs/heads/main", "refs/remotes/upstream/main"]
+                        [
+                            "git",
+                            "update-ref",
+                            "refs/heads/main",
+                            "refs/remotes/upstream/main",
+                        ]
                     )
                 ),
-                mock.call(stacky_module.CmdArgs(["git", "-C", "/wt/main", "reset", "--hard", "HEAD"])),
-                mock.call(stacky_module.CmdArgs(["git", "-C", "/wt/main", "stash", "apply", "--index", "stash@{0}"])),
-                mock.call(stacky_module.CmdArgs(["git", "-C", "/wt/main", "stash", "drop", "stash@{0}"])),
+                mock.call(
+                    stacky_module.CmdArgs(
+                        ["git", "-C", "/wt/main", "reset", "--hard", "HEAD"]
+                    )
+                ),
+                mock.call(
+                    stacky_module.CmdArgs(
+                        [
+                            "git",
+                            "-C",
+                            "/wt/main",
+                            "stash",
+                            "apply",
+                            "--index",
+                            "stash@{0}",
+                        ]
+                    )
+                ),
+                mock.call(
+                    stacky_module.CmdArgs(
+                        ["git", "-C", "/wt/main", "stash", "drop", "stash@{0}"]
+                    )
+                ),
             ]
         )
 
@@ -433,14 +666,20 @@ class TestWorktreeSupport(unittest.TestCase):
         )
         with (
             mock.patch.object(stacky_module, "get_config", return_value=cfg),
-            mock.patch.object(stacky_module, "ensure_worktree", return_value="/wt/child") as ensure_mock,
+            mock.patch.object(
+                stacky_module, "ensure_worktree", return_value="/wt/child"
+            ) as ensure_mock,
             mock.patch.object(stacky_module, "run", return_value="ok") as run_mock,
         ):
             self.assertEqual(stacky_module.rebase_branch_onto_parent(branch), "ok")
 
-        ensure_mock.assert_called_once_with(stacky_module.BranchName("child"), create=False)
+        ensure_mock.assert_called_once_with(
+            stacky_module.BranchName("child"), create=False
+        )
         run_mock.assert_called_once_with(
-            stacky_module.CmdArgs(["git", "-C", "/wt/child", "rebase", "--onto", "parent", "old-parent"]),
+            stacky_module.CmdArgs(
+                ["git", "-C", "/wt/child", "rebase", "--onto", "parent", "old-parent"]
+            ),
             out=True,
             check=False,
         )
@@ -462,7 +701,9 @@ class TestWorktreeSupport(unittest.TestCase):
 
         ensure_mock.assert_not_called()
         run_mock.assert_called_once_with(
-            stacky_module.CmdArgs(["git", "rebase", "--onto", "parent", "old-parent", "child"]),
+            stacky_module.CmdArgs(
+                ["git", "rebase", "--onto", "parent", "old-parent", "child"]
+            ),
             out=True,
             check=False,
         )
@@ -472,13 +713,17 @@ class TestWorktreeSupport(unittest.TestCase):
         stacky_module.CURRENT_BRANCH = stacky_module.BranchName("parent")
         with (
             mock.patch.object(stacky_module, "get_config", return_value=cfg),
-            mock.patch.object(stacky_module, "ensure_worktree", return_value="/wt/parent") as ensure_mock,
+            mock.patch.object(
+                stacky_module, "ensure_worktree", return_value="/wt/parent"
+            ) as ensure_mock,
             mock.patch.object(stacky_module, "run") as run_mock,
             mock.patch.object(stacky_module.sys, "stdout", new=io.StringIO()) as out,
         ):
             stacky_module.restore_sync_location()
 
-        ensure_mock.assert_called_once_with(stacky_module.BranchName("parent"), create=False)
+        ensure_mock.assert_called_once_with(
+            stacky_module.BranchName("parent"), create=False
+        )
         run_mock.assert_not_called()
         self.assertEqual(out.getvalue(), "/wt/parent\n")
 
@@ -493,19 +738,25 @@ class TestWorktreeSupport(unittest.TestCase):
             stacky_module.restore_sync_location()
 
         ensure_mock.assert_not_called()
-        run_mock.assert_called_once_with(stacky_module.CmdArgs(["git", "checkout", "parent"]))
+        run_mock.assert_called_once_with(
+            stacky_module.CmdArgs(["git", "checkout", "parent"])
+        )
 
     def test_emit_conflicted_sync_location_uses_conflicted_branch_worktree(self):
         cfg = stacky_module.StackyConfig(use_worktree=True)
         branch = SimpleNamespace(name=stacky_module.BranchName("child"))
         with (
             mock.patch.object(stacky_module, "get_config", return_value=cfg),
-            mock.patch.object(stacky_module, "ensure_worktree", return_value="/wt/child") as ensure_mock,
+            mock.patch.object(
+                stacky_module, "ensure_worktree", return_value="/wt/child"
+            ) as ensure_mock,
             mock.patch.object(stacky_module.sys, "stdout", new=io.StringIO()) as out,
         ):
             stacky_module.emit_conflicted_sync_location(branch)
 
-        ensure_mock.assert_called_once_with(stacky_module.BranchName("child"), create=False)
+        ensure_mock.assert_called_once_with(
+            stacky_module.BranchName("child"), create=False
+        )
         self.assertEqual(out.getvalue(), "/wt/child\n")
 
     def test_cmd_update_uses_selected_remote(self):
@@ -518,7 +769,9 @@ class TestWorktreeSupport(unittest.TestCase):
             mock.patch.object(stacky_module, "start_muxed_ssh") as start_mux_mock,
             mock.patch.object(stacky_module, "stop_muxed_ssh") as stop_mux_mock,
             mock.patch.object(stacky_module, "run") as run_mock,
-            mock.patch.object(stacky_module, "get_bottom_level_branches_as_forest", return_value=[]),
+            mock.patch.object(
+                stacky_module, "get_bottom_level_branches_as_forest", return_value=[]
+            ),
             mock.patch.object(stacky_module, "load_pr_info_for_forest"),
             mock.patch.object(stacky_module, "get_branches_to_delete", return_value=[]),
             mock.patch.object(stacky_module, "delete_branches"),
@@ -541,11 +794,17 @@ class TestWorktreeSupport(unittest.TestCase):
         cfg = stacky_module.StackyConfig(use_worktree=True)
         with (
             mock.patch.object(stacky_module, "get_config", return_value=cfg),
-            mock.patch.object(stacky_module, "get_worktree_map", return_value={bottom.name: "/wt/main"}),
+            mock.patch.object(
+                stacky_module,
+                "get_worktree_map",
+                return_value={bottom.name: "/wt/main"},
+            ),
             mock.patch.object(stacky_module, "start_muxed_ssh"),
             mock.patch.object(stacky_module, "stop_muxed_ssh"),
             mock.patch.object(stacky_module, "run", return_value="") as run_mock,
-            mock.patch.object(stacky_module, "get_bottom_level_branches_as_forest", return_value=[]),
+            mock.patch.object(
+                stacky_module, "get_bottom_level_branches_as_forest", return_value=[]
+            ),
             mock.patch.object(stacky_module, "load_pr_info_for_forest"),
             mock.patch.object(stacky_module, "get_branches_to_delete", return_value=[]),
             mock.patch.object(stacky_module, "delete_branches"),
@@ -557,15 +816,31 @@ class TestWorktreeSupport(unittest.TestCase):
                 mock.call(stacky_module.CmdArgs(["git", "fetch", "upstream"])),
                 mock.call(
                     stacky_module.CmdArgs(
-                        ["git", "-C", "/wt/main", "status", "--porcelain", "--untracked-files=all"]
+                        [
+                            "git",
+                            "-C",
+                            "/wt/main",
+                            "status",
+                            "--porcelain",
+                            "--untracked-files=all",
+                        ]
                     )
                 ),
                 mock.call(
                     stacky_module.CmdArgs(
-                        ["git", "update-ref", "refs/heads/main", "refs/remotes/upstream/main"]
+                        [
+                            "git",
+                            "update-ref",
+                            "refs/heads/main",
+                            "refs/remotes/upstream/main",
+                        ]
                     )
                 ),
-                mock.call(stacky_module.CmdArgs(["git", "-C", "/wt/main", "reset", "--hard", "HEAD"])),
+                mock.call(
+                    stacky_module.CmdArgs(
+                        ["git", "-C", "/wt/main", "reset", "--hard", "HEAD"]
+                    )
+                ),
             ]
         )
 
@@ -594,7 +869,9 @@ class TestShellSupport(unittest.TestCase):
                 stacky_command="stacky",
                 completion_target=[],
             )
-            with mock.patch.object(stacky_module.sys, "stdout", new=io.StringIO()) as out:
+            with mock.patch.object(
+                stacky_module.sys, "stdout", new=io.StringIO()
+            ) as out:
                 stacky_module.cmd_shell_setup(args)
                 stdout_value = out.getvalue()
             completion_path = os.path.join(real_tmp, "stacky-completion.bash")
@@ -608,30 +885,59 @@ class TestShellSupport(unittest.TestCase):
 class TestVersionReporting(unittest.TestCase):
     def test_get_version_string_uses_stamped_module_commit(self):
         with (
-            mock.patch.object(stacky_module, "stacky_build_info", new=SimpleNamespace(STACKY_BUILD_COMMIT="cafef00d")),
-            mock.patch.object(stacky_module.importlib.metadata, "version", return_value="1.0.13"),
+            mock.patch.object(
+                stacky_module,
+                "stacky_build_info",
+                new=SimpleNamespace(STACKY_BUILD_COMMIT="cafef00d"),
+            ),
+            mock.patch.object(
+                stacky_module.importlib.metadata, "version", return_value="1.0.13"
+            ),
         ):
-            self.assertEqual(stacky_module.get_version_string(), "stacky 1.0.13 (commit cafef00d)")
+            self.assertEqual(
+                stacky_module.get_version_string(), "stacky 1.0.13 (commit cafef00d)"
+            )
 
     def test_get_version_string_uses_stamped_env_commit(self):
         with (
             mock.patch.object(stacky_module, "stacky_build_info", new=None),
-            mock.patch.dict(stacky_module.os.environ, {"STACKY_BUILD_COMMIT": "cafef00d"}, clear=False),
-            mock.patch.object(stacky_module.importlib.metadata, "version", return_value="1.0.13"),
+            mock.patch.dict(
+                stacky_module.os.environ,
+                {"STACKY_BUILD_COMMIT": "cafef00d"},
+                clear=False,
+            ),
+            mock.patch.object(
+                stacky_module.importlib.metadata, "version", return_value="1.0.13"
+            ),
         ):
-            self.assertEqual(stacky_module.get_version_string(), "stacky 1.0.13 (commit cafef00d)")
+            self.assertEqual(
+                stacky_module.get_version_string(), "stacky 1.0.13 (commit cafef00d)"
+            )
 
     def test_get_version_string_uses_embedded_commit(self):
         with (
             mock.patch.dict(stacky_module.os.environ, {}, clear=False),
-            mock.patch.object(stacky_module.importlib.metadata, "version", return_value="1.0.13+gdeadbeef"),
+            mock.patch.object(
+                stacky_module.importlib.metadata,
+                "version",
+                return_value="1.0.13+gdeadbeef",
+            ),
         ):
-            self.assertEqual(stacky_module.get_version_string(), "stacky 1.0.13+gdeadbeef (commit deadbeef)")
+            self.assertEqual(
+                stacky_module.get_version_string(),
+                "stacky 1.0.13+gdeadbeef (commit deadbeef)",
+            )
 
     def test_get_version_string_without_embedded_commit(self):
         with (
-            mock.patch.dict(stacky_module.os.environ, {"STACKY_BUILD_COMMIT": "not-a-sha"}, clear=False),
-            mock.patch.object(stacky_module.importlib.metadata, "version", return_value="1.0.13"),
+            mock.patch.dict(
+                stacky_module.os.environ,
+                {"STACKY_BUILD_COMMIT": "not-a-sha"},
+                clear=False,
+            ),
+            mock.patch.object(
+                stacky_module.importlib.metadata, "version", return_value="1.0.13"
+            ),
         ):
             self.assertEqual(stacky_module.get_version_string(), "stacky 1.0.13")
 
@@ -649,7 +955,9 @@ class TestVersionReporting(unittest.TestCase):
 class TestGhPrCreate(unittest.TestCase):
     def test_create_gh_pr_non_interactive_uses_fill(self):
         parent = SimpleNamespace(name=stacky_module.BranchName("main"))
-        branch = SimpleNamespace(name=stacky_module.BranchName("feature"), parent=parent)
+        branch = SimpleNamespace(
+            name=stacky_module.BranchName("feature"), parent=parent
+        )
         with (
             mock.patch.object(stacky_module, "IS_TERMINAL", False),
             mock.patch.object(stacky_module.os, "isatty", return_value=False),
@@ -665,10 +973,16 @@ class TestGhPrCreate(unittest.TestCase):
 
     def test_create_gh_pr_captured_stdout_uses_fill(self):
         parent = SimpleNamespace(name=stacky_module.BranchName("main"))
-        branch = SimpleNamespace(name=stacky_module.BranchName("feature"), parent=parent)
+        branch = SimpleNamespace(
+            name=stacky_module.BranchName("feature"), parent=parent
+        )
         with (
             mock.patch.object(stacky_module, "IS_TERMINAL", True),
-            mock.patch.object(stacky_module.os, "isatty", side_effect=lambda fd: False if fd == 1 else True),
+            mock.patch.object(
+                stacky_module.os,
+                "isatty",
+                side_effect=lambda fd: False if fd == 1 else True,
+            ),
             mock.patch.object(stacky_module, "find_reviewers", return_value=None),
             mock.patch.object(stacky_module, "find_issue_marker", return_value=None),
             mock.patch.object(stacky_module, "get_gh_repo", return_value=None),
@@ -681,7 +995,9 @@ class TestGhPrCreate(unittest.TestCase):
 
     def test_create_gh_pr_adds_repo_target(self):
         parent = SimpleNamespace(name=stacky_module.BranchName("main"))
-        branch = SimpleNamespace(name=stacky_module.BranchName("feature"), parent=parent)
+        branch = SimpleNamespace(
+            name=stacky_module.BranchName("feature"), parent=parent
+        )
         with (
             mock.patch.object(stacky_module.os, "isatty", return_value=True),
             mock.patch.object(stacky_module, "find_reviewers", return_value=None),

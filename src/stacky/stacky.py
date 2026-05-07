@@ -166,8 +166,13 @@ class StackyConfig:
     remote_name: Optional[str] = None
     use_worktree: bool = False
     worktree_root: Optional[str] = None
+    command_overrides: Dict[Tuple[str, ...], List[str]] = dataclasses.field(default_factory=dict)
+    command_override_sources: Dict[Tuple[str, ...], str] = dataclasses.field(default_factory=dict)
+    config_paths_checked: List[str] = dataclasses.field(default_factory=list)
+    config_paths_read: List[str] = dataclasses.field(default_factory=list)
 
     def read_one_config(self, config_path: str):
+        self.config_paths_read.append(config_path)
         rawconfig = configparser.ConfigParser()
         rawconfig.read(config_path)
         if rawconfig.has_section("UI"):
@@ -178,6 +183,27 @@ class StackyConfig:
             self.remote_name = rawconfig.get("UI", "remote_name", fallback=self.remote_name)
             self.use_worktree = rawconfig.getboolean("UI", "use_worktree", fallback=self.use_worktree)
             self.worktree_root = rawconfig.get("UI", "worktree_root", fallback=self.worktree_root)
+        if rawconfig.has_section("command"):
+            for key, value in rawconfig.items("command", raw=True):
+                command = tuple(shlex.split(key))
+                replacement = shlex.split(value)
+                if not command:
+                    die("Invalid empty command override in {}", config_path)
+                if not replacement:
+                    die("Invalid empty replacement for command override {} in {}", key, config_path)
+                self.command_overrides[command] = replacement
+                self.command_override_sources[command] = config_path
+
+    def resolve_command(self, cmd: CmdArgs) -> CmdArgs:
+        args = list(cmd)
+        best_match: Optional[Tuple[str, ...]] = None
+        for command in self.command_overrides:
+            if len(command) <= len(args) and tuple(args[: len(command)]) == command:
+                if best_match is None or len(command) > len(best_match):
+                    best_match = command
+        if best_match is None:
+            return cmd
+        return CmdArgs(self.command_overrides[best_match] + args[len(best_match) :])
 
 
 CONFIG: Optional["StackyConfig"] = None
@@ -197,12 +223,32 @@ def read_config() -> StackyConfig:
         f"{repo_top_level}/.stackyconfig",
         os.path.expanduser("~/.stackyconfig"),
     ]
+    config.config_paths_checked = config_paths
 
     for p in config_paths:
         if os.path.exists(p):
             config.read_one_config(p)
 
     return config
+
+
+def cmd_debug_config(args):
+    config = get_config()
+    sys.stdout.write(f"top_level_dir = {TOP_LEVEL_DIR}\n")
+    sys.stdout.write(f"repo_top_level_dir = {REPO_TOP_LEVEL_DIR}\n")
+    sys.stdout.write("config paths:\n")
+    read_paths = set(config.config_paths_read)
+    for path in config.config_paths_checked:
+        status = "read" if path in read_paths else "missing"
+        sys.stdout.write(f"  [{status}] {path}\n")
+    sys.stdout.write("command overrides:\n")
+    if not config.command_overrides:
+        sys.stdout.write("  <none>\n")
+        return
+    for command in sorted(config.command_overrides):
+        replacement = config.command_overrides[command]
+        source = config.command_override_sources.get(command, "<unknown>")
+        sys.stdout.write(f"  {shlex.join(command)} = {shlex.join(replacement)}  # from {source}\n")
 
 
 def fmt(s: str, *args, color: bool = False, fg=None, bg=None, style=None, **kwargs) -> str:
@@ -489,7 +535,14 @@ def _existing_worktree_from_git_error(stderr: str, branch: BranchName) -> Option
     return match.group(2)
 
 
+def resolve_command(cmd: CmdArgs) -> CmdArgs:
+    if CONFIG is None:
+        return cmd
+    return CONFIG.resolve_command(cmd)
+
+
 def run_multiline(cmd: CmdArgs, *, check: bool = True, null: bool = True, out: bool = False) -> Optional[str]:
+    cmd = resolve_command(cmd)
     debug("Running: {}", shlex.join(cmd))
     sys.stdout.flush()
     sys.stderr.flush()
@@ -1118,6 +1171,7 @@ def _list_spare_worktree_paths(root: str, entries: List[WorktreeEntry]) -> List[
 
 
 def _run_worktree_branch_command(cmd: CmdArgs, branch: BranchName) -> Optional[str]:
+    cmd = resolve_command(cmd)
     debug("Running: {}", shlex.join(cmd))
     sys.stdout.flush()
     sys.stderr.flush()
@@ -2249,6 +2303,9 @@ def main():
         continue_parser = subparsers.add_parser("continue", help="Continue previously interrupted command")
         continue_parser.set_defaults(func=None)
 
+        debug_config_parser = subparsers.add_parser("debug-config", help="Print resolved Stacky configuration")
+        debug_config_parser.set_defaults(func=cmd_debug_config)
+
         # down
         down_parser = subparsers.add_parser("down", help="Go down in the current stack (towards master/main)")
         down_parser.set_defaults(func=cmd_branch_down)
@@ -2519,6 +2576,10 @@ def main():
         elif args.color == "never":
             COLOR_STDERR = False
             COLOR_STDOUT = False
+
+        if args.command == "debug-config":
+            args.func(args)
+            return
 
         init_git()
         if args_need_gh(args):
