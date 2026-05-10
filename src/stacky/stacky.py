@@ -1915,6 +1915,65 @@ def cmd_worktree_gc(stack: StackBranchSet, args):  # noqa: ARG001
     run(CmdArgs(["git", "worktree", "prune"]))
 
 
+def _checked_out_branch_worktree(branch: BranchName, worktree_map: Dict[BranchName, str]) -> Optional[str]:
+    path = worktree_map.get(branch)
+    if path is not None:
+        return path
+    if branch == CURRENT_BRANCH:
+        return ""
+    return None
+
+
+def _worktree_git_cmd(path: str, args: List[str]) -> CmdArgs:
+    cmd = ["git"]
+    if path:
+        cmd.extend(["-C", path])
+    cmd.extend(args)
+    return CmdArgs(cmd)
+
+
+def stash_checked_out_branch_changes(branch: BranchName, worktree_map: Dict[BranchName, str]) -> bool:
+    path = _checked_out_branch_worktree(branch, worktree_map)
+    if path is None:
+        return False
+    status = run(_worktree_git_cmd(path, ["status", "--porcelain", "--untracked-files=all"]))
+    if not status:
+        return False
+    run(_worktree_git_cmd(path, ["stash", "push", "--include-untracked", "-m", f"stacky update: {branch}"]))
+    return True
+
+
+def restore_checked_out_branch_stash(branch: BranchName, worktree_map: Dict[BranchName, str]):
+    path = _checked_out_branch_worktree(branch, worktree_map)
+    if path is None:
+        return
+    run(_worktree_git_cmd(path, ["stash", "apply", "--index", "stash@{0}"]))
+    run(_worktree_git_cmd(path, ["stash", "drop", "stash@{0}"]))
+
+
+def reset_checked_out_branch(branch: BranchName, worktree_map: Dict[BranchName, str]):
+    path = _checked_out_branch_worktree(branch, worktree_map)
+    if path is not None:
+        run(_worktree_git_cmd(path, ["reset", "--hard", "HEAD"]))
+
+
+def update_bottom_branch(remote: str, branch: BranchName, remote_branch: BranchName, worktree_map: Dict[BranchName, str]):
+    stashed = stash_checked_out_branch_changes(branch, worktree_map)
+    run(
+        CmdArgs(
+            [
+                "git",
+                "update-ref",
+                "refs/heads/{}".format(branch),
+                "refs/remotes/{}/{}".format(remote, remote_branch),
+            ]
+        )
+    )
+    reset_checked_out_branch(branch, worktree_map)
+    if stashed:
+        restore_checked_out_branch_stash(branch, worktree_map)
+
+
 def cmd_update(stack: StackBranchSet, args):
     remote = args.remote_name
     start_muxed_ssh(remote)
@@ -1924,19 +1983,10 @@ def cmd_update(stack: StackBranchSet, args):
     # TODO(tudor): We should rebase instead of silently dropping
     # everything you have on local master. Oh well.
     global CURRENT_BRANCH
+    config = get_config()
+    worktree_map = get_worktree_map() if config.use_worktree else {}
     for b in stack.bottoms:
-        run(
-            CmdArgs(
-                [
-                    "git",
-                    "update-ref",
-                    "refs/heads/{}".format(b.name),
-                    "refs/remotes/{}/{}".format(remote, b.remote_branch),
-                ]
-            )
-        )
-        if b.name == CURRENT_BRANCH:
-            run(CmdArgs(["git", "reset", "--hard", "HEAD"]))
+        update_bottom_branch(remote, b.name, b.remote_branch, worktree_map)
 
     # We treat origin as the source of truth for bottom branches (master), and
     # the local repo as the source of truth for everything else. So we can only

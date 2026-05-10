@@ -333,6 +333,63 @@ class TestWorktreeSupport(unittest.TestCase):
             ]
         )
 
+    def test_reset_checked_out_branch_uses_branch_worktree(self):
+        with mock.patch.object(stacky_module, "run") as run_mock:
+            stacky_module.reset_checked_out_branch(
+                stacky_module.BranchName("main"),
+                {stacky_module.BranchName("main"): "/wt/main"},
+            )
+
+        run_mock.assert_called_once_with(stacky_module.CmdArgs(["git", "-C", "/wt/main", "reset", "--hard", "HEAD"]))
+
+    def test_reset_checked_out_branch_uses_current_worktree_without_branch_worktree(self):
+        stacky_module.CURRENT_BRANCH = stacky_module.BranchName("main")
+        with mock.patch.object(stacky_module, "run") as run_mock:
+            stacky_module.reset_checked_out_branch(stacky_module.BranchName("main"), {})
+
+        run_mock.assert_called_once_with(stacky_module.CmdArgs(["git", "reset", "--hard", "HEAD"]))
+
+    def test_update_bottom_branch_stashes_and_restores_worktree_changes(self):
+        with mock.patch.object(stacky_module, "run", side_effect=[" M file.txt", None, None, None, None, None]) as run_mock:
+            stacky_module.update_bottom_branch(
+                "upstream",
+                stacky_module.BranchName("main"),
+                stacky_module.BranchName("main"),
+                {stacky_module.BranchName("main"): "/wt/main"},
+            )
+
+        run_mock.assert_has_calls(
+            [
+                mock.call(
+                    stacky_module.CmdArgs(
+                        ["git", "-C", "/wt/main", "status", "--porcelain", "--untracked-files=all"]
+                    )
+                ),
+                mock.call(
+                    stacky_module.CmdArgs(
+                        [
+                            "git",
+                            "-C",
+                            "/wt/main",
+                            "stash",
+                            "push",
+                            "--include-untracked",
+                            "-m",
+                            "stacky update: main",
+                        ]
+                    )
+                ),
+                mock.call(
+                    stacky_module.CmdArgs(
+                        ["git", "update-ref", "refs/heads/main", "refs/remotes/upstream/main"]
+                    )
+                ),
+                mock.call(stacky_module.CmdArgs(["git", "-C", "/wt/main", "reset", "--hard", "HEAD"])),
+                mock.call(stacky_module.CmdArgs(["git", "-C", "/wt/main", "stash", "apply", "--index", "stash@{0}"])),
+                mock.call(stacky_module.CmdArgs(["git", "-C", "/wt/main", "stash", "drop", "stash@{0}"])),
+            ]
+        )
+
     def test_rebase_branch_onto_parent_uses_branch_worktree(self):
         cfg = stacky_module.StackyConfig(use_worktree=True)
         parent = SimpleNamespace(name=stacky_module.BranchName("parent"))
@@ -422,7 +479,9 @@ class TestWorktreeSupport(unittest.TestCase):
         stack = MagicMock()
         stack.bottoms = set()
         args = Namespace(remote_name="upstream", force=True)
+        cfg = stacky_module.StackyConfig(use_worktree=False)
         with (
+            mock.patch.object(stacky_module, "get_config", return_value=cfg),
             mock.patch.object(stacky_module, "start_muxed_ssh") as start_mux_mock,
             mock.patch.object(stacky_module, "stop_muxed_ssh") as stop_mux_mock,
             mock.patch.object(stacky_module, "run") as run_mock,
@@ -435,6 +494,47 @@ class TestWorktreeSupport(unittest.TestCase):
         start_mux_mock.assert_called_once_with("upstream")
         run_mock.assert_any_call(stacky_module.CmdArgs(["git", "fetch", "upstream"]))
         stop_mux_mock.assert_called_once_with("upstream")
+
+    def test_cmd_update_resets_checked_out_bottom_worktree(self):
+        class Bottom:
+            pass
+
+        bottom = Bottom()
+        bottom.name = stacky_module.BranchName("main")
+        bottom.remote_branch = stacky_module.BranchName("main")
+        stack = MagicMock()
+        stack.bottoms = {bottom}
+        args = Namespace(remote_name="upstream", force=True)
+        cfg = stacky_module.StackyConfig(use_worktree=True)
+        with (
+            mock.patch.object(stacky_module, "get_config", return_value=cfg),
+            mock.patch.object(stacky_module, "get_worktree_map", return_value={bottom.name: "/wt/main"}),
+            mock.patch.object(stacky_module, "start_muxed_ssh"),
+            mock.patch.object(stacky_module, "stop_muxed_ssh"),
+            mock.patch.object(stacky_module, "run", return_value="") as run_mock,
+            mock.patch.object(stacky_module, "get_bottom_level_branches_as_forest", return_value=[]),
+            mock.patch.object(stacky_module, "load_pr_info_for_forest"),
+            mock.patch.object(stacky_module, "get_branches_to_delete", return_value=[]),
+            mock.patch.object(stacky_module, "delete_branches"),
+        ):
+            stacky_module.cmd_update(stack, args)
+
+        run_mock.assert_has_calls(
+            [
+                mock.call(stacky_module.CmdArgs(["git", "fetch", "upstream"])),
+                mock.call(
+                    stacky_module.CmdArgs(
+                        ["git", "-C", "/wt/main", "status", "--porcelain", "--untracked-files=all"]
+                    )
+                ),
+                mock.call(
+                    stacky_module.CmdArgs(
+                        ["git", "update-ref", "refs/heads/main", "refs/remotes/upstream/main"]
+                    )
+                ),
+                mock.call(stacky_module.CmdArgs(["git", "-C", "/wt/main", "reset", "--hard", "HEAD"])),
+            ]
+        )
 
 
 class TestShellSupport(unittest.TestCase):
