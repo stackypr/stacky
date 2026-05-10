@@ -79,7 +79,7 @@ jobs:
         with:
           python-version: '3.10'
       - run: pip install asciitree ansicolors simple-term-menu
-      - run: ./src/stacky/stacky_test.py
+      - run: PYTHONPATH=src python -m unittest discover -s src -p '*_test.py'
 
   typecheck:
     name: static type check

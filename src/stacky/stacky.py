@@ -23,6 +23,7 @@
 
 import configparser
 import dataclasses
+import importlib.metadata
 import json
 import logging
 import os
@@ -30,6 +31,7 @@ import re
 import shlex
 import subprocess
 import sys
+import textwrap
 import time
 from argparse import ArgumentParser
 from typing import (
@@ -48,6 +50,11 @@ from typing import (
 import asciitree  # type: ignore
 import colors  # type: ignore
 from simple_term_menu import TerminalMenu  # type: ignore
+
+try:
+    import _stacky_build_info as stacky_build_info  # type: ignore
+except Exception:
+    stacky_build_info = None
 
 BranchName = NewType("BranchName", str)
 PathName = NewType("PathName", str)
@@ -85,16 +92,25 @@ class BranchNCommit:
     parent_commit: Optional[str]
 
 
+@dataclasses.dataclass
+class WorktreeEntry:
+    path: str
+    branch: Optional[BranchName]
+
+
 _LOGGING_FORMAT = "%(asctime)s %(module)s %(levelname)s: %(message)s"
 
 # 2 minutes ought to be enough for anybody ;-)
 MAX_SSH_MUX_LIFETIME = 120
 COLOR_STDOUT: bool = os.isatty(1)
 COLOR_STDERR: bool = os.isatty(2)
-IS_TERMINAL: bool = os.isatty(1) and os.isatty(2)
+# Interactivity should depend on input/error streams. stdout may be captured
+# by shell wrappers (for auto-cd) while still being fully interactive.
+IS_TERMINAL: bool = os.isatty(0) and os.isatty(2)
 CURRENT_BRANCH: BranchName
 STACK_BOTTOMS: FrozenSet[BranchName] = frozenset([BranchName("master"), BranchName("main")])
 TOP_LEVEL_DIR: str
+REPO_TOP_LEVEL_DIR: str
 
 STATE_FILE: str
 TMP_STATE_FILE: str
@@ -109,21 +125,59 @@ LOGLEVELS = {
 }
 
 
+def _normalize_embedded_commit(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    v = value.strip().lower()
+    if re.fullmatch(r"[0-9a-f]{7,40}", v):
+        return v
+    return None
+
+
+def get_version_string() -> str:
+    package_name = "rockset-stacky"
+    try:
+        version = importlib.metadata.version(package_name)
+    except importlib.metadata.PackageNotFoundError:
+        version = "dev"
+
+    commit = _normalize_embedded_commit(
+        getattr(stacky_build_info, "STACKY_BUILD_COMMIT", None) if stacky_build_info is not None else None
+    )
+    if commit is None:
+        commit = _normalize_embedded_commit(os.environ.get("STACKY_BUILD_COMMIT"))
+
+    # Commit is build metadata embedded into the package version at build time.
+    if commit is None:
+        match = re.search(r"\+g([0-9a-fA-F]{7,40})$", version)
+        commit = match.group(1).lower() if match is not None else None
+
+    if commit is None:
+        return f"stacky {version}"
+    return f"stacky {version} (commit {commit})"
+
+
 @dataclasses.dataclass
 class StackyConfig:
     skip_confirm: bool = False
     change_to_main: bool = False
     change_to_adopted: bool = False
     share_ssh_session: bool = False
+    remote_name: Optional[str] = None
+    use_worktree: bool = False
+    worktree_root: Optional[str] = None
 
     def read_one_config(self, config_path: str):
         rawconfig = configparser.ConfigParser()
         rawconfig.read(config_path)
         if rawconfig.has_section("UI"):
-            self.skip_confirm = bool(rawconfig.get("UI", "skip_confirm", fallback=self.skip_confirm))
-            self.change_to_main = bool(rawconfig.get("UI", "change_to_main", fallback=self.change_to_main))
-            self.change_to_adopted = bool(rawconfig.get("UI", "change_to_adopted", fallback=self.change_to_adopted))
-            self.share_ssh_session = bool(rawconfig.get("UI", "share_ssh_session", fallback=self.share_ssh_session))
+            self.skip_confirm = rawconfig.getboolean("UI", "skip_confirm", fallback=self.skip_confirm)
+            self.change_to_main = rawconfig.getboolean("UI", "change_to_main", fallback=self.change_to_main)
+            self.change_to_adopted = rawconfig.getboolean("UI", "change_to_adopted", fallback=self.change_to_adopted)
+            self.share_ssh_session = rawconfig.getboolean("UI", "share_ssh_session", fallback=self.share_ssh_session)
+            self.remote_name = rawconfig.get("UI", "remote_name", fallback=self.remote_name)
+            self.use_worktree = rawconfig.getboolean("UI", "use_worktree", fallback=self.use_worktree)
+            self.worktree_root = rawconfig.get("UI", "worktree_root", fallback=self.worktree_root)
 
 
 CONFIG: Optional["StackyConfig"] = None
@@ -138,8 +192,9 @@ def get_config() -> StackyConfig:
 
 def read_config() -> StackyConfig:
     config = StackyConfig()
+    repo_top_level = globals().get("REPO_TOP_LEVEL_DIR") or globals().get("TOP_LEVEL_DIR") or os.getcwd()
     config_paths = [
-        f"{TOP_LEVEL_DIR}/.stackyconfig",
+        f"{repo_top_level}/.stackyconfig",
         os.path.expanduser("~/.stackyconfig"),
     ]
 
@@ -156,11 +211,222 @@ def fmt(s: str, *args, color: bool = False, fg=None, bg=None, style=None, **kwar
 
 
 def cout(*args, **kwargs):
-    return sys.stdout.write(fmt(*args, color=COLOR_STDOUT, **kwargs))
+    return sys.stderr.write(fmt(*args, color=COLOR_STDERR, **kwargs))
 
 
 def _log(fn, *args, **kwargs):
     return fn("%s", fmt(*args, color=COLOR_STDERR, **kwargs))
+
+
+def emit_location(path: str):
+    sys.stdout.write(f"{path}\n")
+    sys.stdout.flush()
+
+
+def _default_shell() -> str:
+    shell = os.path.basename(os.environ.get("SHELL", ""))
+    if shell in ["bash", "zsh"]:
+        return shell
+    return "bash"
+
+
+def render_shell_wrapper(function_name: str, stacky_command: str) -> str:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", function_name):
+        die("Invalid function name {}", function_name)
+    cmd = shlex.quote(stacky_command)
+    return textwrap.dedent(f"""\
+        {function_name}() {{
+          case "$1" in
+            checkout|co|sco|up|down|update|sync|continue)
+              ;;
+            branch|b)
+              case "$2" in
+                new|create|checkout|co|up|u|down|d) ;;
+                *) command {cmd} "$@"; return $? ;;
+              esac
+              ;;
+            stack|s)
+              case "$2" in
+                checkout|co|sync) ;;
+                *) command {cmd} "$@"; return $? ;;
+              esac
+              ;;
+            upstack|us|downstack|ds)
+              case "$2" in
+                sync) ;;
+                *) command {cmd} "$@"; return $? ;;
+              esac
+              ;;
+            *)
+              command {cmd} "$@"
+              return $?
+              ;;
+          esac
+
+          local out rc
+          out="$(command {cmd} "$@")"
+          rc=$?
+
+          if [ -n "$out" ] && [ -d "$out" ]; then
+            cd "$out" || return 1
+          elif [ -n "$out" ]; then
+            printf '%s\\n' "$out"
+          fi
+          [ $rc -ne 0 ] && return $rc
+        }}
+        """)
+
+
+def _completion_targets(stacky_command: str, extra: Optional[List[str]] = None) -> List[str]:
+    targets = [os.path.basename(stacky_command), "st"]
+    if extra:
+        targets.extend(extra)
+    deduped: List[str] = []
+    seen = set()
+    for target in targets:
+        if not target:
+            continue
+        if target in seen:
+            continue
+        seen.add(target)
+        deduped.append(target)
+    return deduped
+
+
+def render_shell_completion(shell: str, stacky_command: str, extra_targets: Optional[List[str]] = None) -> str:
+    cmd = shlex.quote(stacky_command)
+    completion_targets = " ".join(shlex.quote(t) for t in _completion_targets(stacky_command, extra_targets))
+    body = textwrap.dedent(f"""\
+        _stacky__parse_subcommands() {{
+          local out parsed
+          out="$("$1" "${{@:2}}" --help 2>/dev/null)"
+          parsed="$(printf '%s\\n' "$out" | awk '
+            BEGIN {{ in_pos = 0 }}
+            /^positional arguments:/ {{ in_pos = 1; next }}
+            in_pos && /^[[:space:]]+\\{{/ {{
+              line = $0
+              sub(/^[[:space:]]*\\{{/, "", line)
+              sub(/\\}}.*/, "", line)
+              gsub(/,/, " ", line)
+              print line
+              exit
+            }}
+          ')"
+          if [ -n "$parsed" ]; then
+            printf '%s\\n' "$parsed"
+            return 0
+          fi
+          # Fallback: take the last {{...}} group from usage (usually subcommands).
+          printf '%s\\n' "$out" | sed -n 's/.*{{\\([^}}]*\\)}}[^}}]*$/\\1/p' | head -n 1 | tr ',' ' '
+        }}
+
+        _stacky__parse_options() {{
+          "$1" "${{@:2}}" --help 2>/dev/null | grep -oE -- '--[a-zA-Z0-9-]+' | sort -u
+        }}
+
+        _stacky__local_branches() {{
+          git for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null
+        }}
+
+        _stacky_complete() {{
+          local cur prev first second stacky_cmd subcmds opts
+          COMPREPLY=()
+          cur="${{COMP_WORDS[COMP_CWORD]}}"
+          prev="${{COMP_WORDS[COMP_CWORD-1]}}"
+          first="${{COMP_WORDS[1]}}"
+          second="${{COMP_WORDS[2]}}"
+          stacky_cmd={cmd}
+          subcmds=""
+          opts=""
+
+          if [ "$prev" = "--shell" ]; then
+            COMPREPLY=( $(compgen -W "bash zsh" -- "$cur") )
+            return 0
+          fi
+          if [ "$prev" = "--output-dir" ]; then
+            COMPREPLY=( $(compgen -d -- "$cur") )
+            return 0
+          fi
+
+          if [ "$COMP_CWORD" -le 1 ]; then
+            subcmds="$(_stacky__parse_subcommands "$stacky_cmd")"
+            opts="$(_stacky__parse_options "$stacky_cmd")"
+            COMPREPLY=( $(compgen -W "$subcmds $opts" -- "$cur") )
+            return 0
+          fi
+
+          # Complete branch names locally for checkout-like commands.
+          if [ "$COMP_CWORD" -eq 2 ] && [[ "$first" == "checkout" || "$first" == "co" ]]; then
+            COMPREPLY=( $(compgen -W "$(_stacky__local_branches)" -- "$cur") )
+            return 0
+          fi
+          if [ "$COMP_CWORD" -eq 3 ] && [[ "$first" == "branch" || "$first" == "b" ]] && [[ "$second" == "checkout" || "$second" == "co" ]]; then
+            COMPREPLY=( $(compgen -W "$(_stacky__local_branches)" -- "$cur") )
+            return 0
+          fi
+          if [ "$COMP_CWORD" -eq 3 ] && [[ "$first" == "stack" || "$first" == "s" ]] && [[ "$second" == "checkout" || "$second" == "co" ]]; then
+            COMPREPLY=( $(compgen -W "$(_stacky__local_branches)" -- "$cur") )
+            return 0
+          fi
+
+          case "$first" in
+            branch|b|stack|s|upstack|us|downstack|ds|worktree|shell)
+              subcmds="$(_stacky__parse_subcommands "$stacky_cmd" "$first")"
+              opts="$(_stacky__parse_options "$stacky_cmd" "$first")"
+              ;;
+            *)
+              opts="$(_stacky__parse_options "$stacky_cmd")"
+              ;;
+          esac
+
+          if [[ "$cur" == -* ]]; then
+            COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            return 0
+          fi
+
+          COMPREPLY=( $(compgen -W "$subcmds" -- "$cur") )
+          return 0
+        }}
+
+        complete -F _stacky_complete {completion_targets}
+        """)
+    if shell == "zsh":
+        return textwrap.dedent(f"""\
+            autoload -Uz bashcompinit
+            bashcompinit
+
+            {body}
+            """)
+    return body
+
+
+def cmd_shell_completion(args):
+    sys.stdout.write(render_shell_completion(args.shell, args.stacky_command, extra_targets=args.completion_target))
+
+
+def cmd_shell_wrapper(args):
+    sys.stdout.write(render_shell_wrapper(args.function_name, args.stacky_command))
+
+
+def cmd_shell_setup(args):
+    output_dir = os.path.realpath(os.path.expanduser(args.output_dir))
+    os.makedirs(output_dir, exist_ok=True)
+    completion_path = os.path.join(output_dir, f"stacky-completion.{args.shell}")
+    wrapper_path = os.path.join(output_dir, f"stacky-wrapper.{args.shell}")
+    with open(completion_path, "w") as f:
+        f.write(
+            render_shell_completion(
+                args.shell,
+                args.stacky_command,
+                extra_targets=[args.function_name] + (args.completion_target or []),
+            )
+        )
+    with open(wrapper_path, "w") as f:
+        f.write(render_shell_wrapper(args.function_name, args.stacky_command))
+    info("Wrote completion script to {}", completion_path)
+    info("Wrote wrapper script to {}", wrapper_path)
+    sys.stdout.write(f"source {shlex.quote(completion_path)}\n")
+    sys.stdout.write(f"source {shlex.quote(wrapper_path)}\n")
 
 
 def debug(*args, **kwargs):
@@ -212,6 +478,15 @@ def _check_returncode(sp: subprocess.CompletedProcess, cmd: CmdArgs):
         die("Killed by signal {}: {}. Stderr was:\n{}", -rc, shlex.join(cmd), stderr)
     else:
         die("Exited with status {}: {}. Stderr was:\n{}", rc, shlex.join(cmd), stderr)
+
+
+def _existing_worktree_from_git_error(stderr: str, branch: BranchName) -> Optional[str]:
+    match = re.search(r"fatal: '([^']+)' is already (?:used by worktree|checked out) at '([^']+)'", stderr)
+    if match is None:
+        return None
+    if match.group(1) != str(branch):
+        return None
+    return match.group(2)
 
 
 def run_multiline(cmd: CmdArgs, *, check: bool = True, null: bool = True, out: bool = False) -> Optional[str]:
@@ -296,12 +571,58 @@ def get_stack_parent_commit(branch: BranchName) -> Optional[Commit]:  # type: ig
         return Commit(c)
 
 
+def infer_stack_parent_branch(branch: BranchName, parent_commit: Commit) -> Optional[BranchName]:
+    candidates: List[BranchName] = []
+    for candidate in get_all_branches():
+        if candidate == branch:
+            continue
+        merge_base = run(CmdArgs(["git", "merge-base", str(candidate), str(branch)]), check=False)
+        if merge_base == parent_commit:
+            candidates.append(candidate)
+
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    exact_heads = [candidate for candidate in candidates if get_commit(candidate) == parent_commit]
+    if len(exact_heads) == 1:
+        return exact_heads[0]
+
+    bottoms = [candidate for candidate in candidates if candidate in STACK_BOTTOMS]
+    if len(bottoms) == 1:
+        return bottoms[0]
+    return None
+
+
 def get_commit(branch: BranchName) -> Commit:  # type: ignore [return]
     c = run_always_return(CmdArgs(["git", "rev-parse", "refs/heads/{}".format(branch)]), check=False)
     return Commit(c)
 
 
-def get_pr_info(branch: BranchName, *, full: bool = False) -> PRInfos:
+def get_gh_repo(remote_name: str = "origin") -> Optional[str]:
+    gh_resolved = run(CmdArgs(["git", "config", f"remote.{remote_name}.gh-resolved"]), check=False)
+    if gh_resolved is not None and "/" in gh_resolved:
+        return gh_resolved
+
+    url = run(CmdArgs(["git", "config", f"remote.{remote_name}.url"]), check=False)
+    if url is None:
+        return None
+
+    # Support common ssh/https remote URL formats.
+    match = re.match(r"^(?:(?:https?|ssh)://(?:git@)?|git@)?[^/:]+[:/]([^/]+)/(.+?)(?:\.git)?/?$", url)
+    if match is None:
+        return None
+    return f"{match.group(1)}/{match.group(2)}"
+
+
+def maybe_add_gh_repo(cmd: List[str], *, remote_name: str = "origin"):
+    repo = get_gh_repo(remote_name)
+    if repo is not None:
+        cmd.extend(["-R", repo])
+
+
+def get_pr_info(branch: BranchName, *, full: bool = False, remote_name: str = "origin") -> PRInfos:
     fields = [
         "id",
         "number",
@@ -314,23 +635,19 @@ def get_pr_info(branch: BranchName, *, full: bool = False) -> PRInfos:
     ]
     if full:
         fields += ["commits"]
-    data = json.loads(
-        run_always_return(
-            CmdArgs(
-                [
-                    "gh",
-                    "pr",
-                    "list",
-                    "--json",
-                    ",".join(fields),
-                    "--state",
-                    "all",
-                    "--head",
-                    branch,
-                ]
-            )
-        )
-    )
+    cmd = [
+        "gh",
+        "pr",
+        "list",
+        "--json",
+        ",".join(fields),
+        "--state",
+        "all",
+        "--head",
+        branch,
+    ]
+    maybe_add_gh_repo(cmd, remote_name=remote_name)
+    data = json.loads(run_always_return(CmdArgs(cmd)))
     raw_infos: List[PRInfo] = data
 
     infos: Dict[str, PRInfo] = {info["id"]: info for info in raw_infos}
@@ -457,6 +774,12 @@ def load_stack_for_given_branch(
     while branch not in STACK_BOTTOMS:
         parent = get_stack_parent_branch(branch)
         parent_commit = get_stack_parent_commit(branch)
+        if parent is None and parent_commit is not None:
+            inferred_parent = infer_stack_parent_branch(branch, parent_commit)
+            if inferred_parent is not None:
+                info("Recovered missing stack parent for {} -> {}", branch, inferred_parent)
+                set_parent(branch, inferred_parent, set_origin=True)
+                parent = inferred_parent
         branches.append(BranchNCommit(branch, parent_commit))
         if not parent or not parent_commit:
             if check:
@@ -554,15 +877,15 @@ ASCII_TREE = asciitree.LeftAligned(draw=_ASCII_TREE_STYLE)
 
 def print_tree(tree: BranchesTree):
     global ASCII_TREE
-    s = ASCII_TREE(format_tree(tree, colorize=COLOR_STDOUT))
+    s = ASCII_TREE(format_tree(tree, colorize=COLOR_STDERR))
     lines = s.split("\n")
-    print("\n".join(reversed(lines)))
+    print("\n".join(reversed(lines)), file=sys.stderr)
 
 
 def print_forest(trees: List[BranchesTree]):
     for i, t in enumerate(trees):
         if i != 0:
-            print()
+            print(file=sys.stderr)
         print_tree(t)
 
 
@@ -661,9 +984,199 @@ def cmd_info(stack: StackBranchSet, args):
     print_forest(forest)
 
 
+def get_worktree_root() -> str:
+    config = get_config()
+    base = globals().get("REPO_TOP_LEVEL_DIR") or globals().get("TOP_LEVEL_DIR") or os.getcwd()
+    root = config.worktree_root or os.path.join(base, ".stacky", "worktrees")
+    root = os.path.expanduser(root)
+    if not os.path.isabs(root):
+        root = os.path.join(base, root)
+    return root
+
+
+def worktree_dir_for_branch(branch: BranchName) -> str:
+    safe = str(branch).replace("/", "__")
+    return os.path.join(get_worktree_root(), safe)
+
+
+def _parse_worktree_entries(out: str) -> List[WorktreeEntry]:
+    entries: List[WorktreeEntry] = []
+    current_path: Optional[str] = None
+    current_branch: Optional[BranchName] = None
+    for line in out.splitlines():
+        if not line:
+            if current_path is not None:
+                entries.append(WorktreeEntry(path=current_path, branch=current_branch))
+            current_path = None
+            current_branch = None
+            continue
+        if line.startswith("worktree "):
+            current_path = line[len("worktree ") :].strip()
+            current_branch = None
+            continue
+        if line.startswith("branch ") and current_path is not None:
+            ref = line[len("branch ") :].strip()
+            if ref.startswith("refs/heads/"):
+                current_branch = BranchName(ref[len("refs/heads/") :])
+    if current_path is not None:
+        entries.append(WorktreeEntry(path=current_path, branch=current_branch))
+    return entries
+
+
+def _parse_worktree_list(out: str) -> Dict[BranchName, str]:
+    worktrees: Dict[BranchName, str] = {}
+    for entry in _parse_worktree_entries(out):
+        if entry.branch is not None:
+            worktrees[entry.branch] = entry.path
+    return worktrees
+
+
+def get_worktree_map() -> Dict[BranchName, str]:
+    return {entry.branch: entry.path for entry in get_worktree_entries() if entry.branch is not None}
+
+
+def get_worktree_entries() -> List[WorktreeEntry]:
+    out = run_multiline(CmdArgs(["git", "worktree", "list", "--porcelain"]))
+    if out is None:
+        return []
+    return _parse_worktree_entries(out)
+
+
+def _is_managed_worktree_path(root: str, path: str) -> bool:
+    path_real = os.path.realpath(path)
+    root_real = os.path.realpath(root)
+    if os.path.dirname(path_real) != root_real:
+        return False
+    return re.fullmatch(r"checkout-\d+", os.path.basename(path_real)) is not None
+
+
+def _worktree_pool_index(root: str, path: str) -> Optional[int]:
+    path_real = os.path.realpath(path)
+    root_real = os.path.realpath(root)
+    if os.path.dirname(path_real) != root_real:
+        return None
+    m = re.fullmatch(r"checkout-(\d+)", os.path.basename(path_real))
+    if m is None:
+        return None
+    return int(m.group(1))
+
+
+def _next_worktree_pool_path(root: str, existing_paths: List[str]) -> str:
+    used_indices = set()
+    for path in existing_paths:
+        idx = _worktree_pool_index(root, path)
+        if idx is not None:
+            used_indices.add(idx)
+    candidate = 1
+    while candidate in used_indices:
+        candidate += 1
+    return os.path.join(root, f"checkout-{candidate}")
+
+
+def _find_spare_worktree_path(root: str, entries: List[WorktreeEntry]) -> Optional[str]:
+    spares = [entry.path for entry in entries if entry.branch is None and _is_managed_worktree_path(root, entry.path)]
+    if not spares:
+        return None
+    spares.sort(key=lambda p: _worktree_pool_index(root, p) or 10**9)
+    return spares[0]
+
+
+def _get_worktree_reset_branch() -> BranchName:
+    main_branch = get_real_stack_bottom()
+    if main_branch is not None:
+        return main_branch
+    for candidate in ["main", "master"]:
+        ref = f"refs/heads/{candidate}"
+        if run(CmdArgs(["git", "rev-parse", "--verify", ref]), check=False) is not None:
+            return BranchName(candidate)
+    die("Cannot find main/master branch for worktree reset")
+    return BranchName("main")
+
+
+def _recycle_worktree_path(path: str):
+    root = get_worktree_root()
+    if not _is_managed_worktree_path(root, path):
+        return
+    target = _get_worktree_reset_branch()
+    run(CmdArgs(["git", "-C", path, "checkout", "--detach", str(target)]))
+    run(CmdArgs(["git", "-C", path, "reset", "--hard", str(target)]))
+
+
+def _list_spare_worktree_paths(root: str, entries: List[WorktreeEntry]) -> List[str]:
+    spares = [entry.path for entry in entries if entry.branch is None and _is_managed_worktree_path(root, entry.path)]
+    spares.sort(key=lambda p: _worktree_pool_index(root, p) or 10**9)
+    return spares
+
+
+def _run_worktree_branch_command(cmd: CmdArgs, branch: BranchName) -> Optional[str]:
+    debug("Running: {}", shlex.join(cmd))
+    sys.stdout.flush()
+    sys.stderr.flush()
+    sp = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if sp.returncode == 0:
+        return None
+    stderr = sp.stderr.decode("UTF-8")
+    existing_path = _existing_worktree_from_git_error(stderr, branch)
+    if existing_path is not None:
+        return existing_path
+    _check_returncode(sp, cmd)
+    return None
+
+
+def ensure_worktree(branch: BranchName, *, create: bool, base: Optional[BranchName] = None) -> str:
+    entries = get_worktree_entries()
+    existing_path = next((entry.path for entry in entries if entry.branch == branch), None)
+    if existing_path:
+        return existing_path
+
+    root = get_worktree_root()
+    os.makedirs(root, exist_ok=True)
+    spare_path = _find_spare_worktree_path(root, entries)
+    if spare_path:
+        if create:
+            if base is None:
+                base = CURRENT_BRANCH or get_current_branch()
+            if base is None:
+                die("Cannot create worktree branch from a detached HEAD")
+            run(CmdArgs(["git", "-C", spare_path, "checkout", "-b", str(branch), str(base)]))
+        else:
+            existing_path = _run_worktree_branch_command(
+                CmdArgs(["git", "-C", spare_path, "checkout", str(branch)]), branch
+            )
+            if existing_path is not None:
+                return existing_path
+        return spare_path
+
+    path = _next_worktree_pool_path(root, [entry.path for entry in entries])
+
+    if create:
+        if base is None:
+            base = CURRENT_BRANCH or get_current_branch()
+        if base is None:
+            die("Cannot create worktree branch from a detached HEAD")
+        run(CmdArgs(["git", "worktree", "add", "-b", str(branch), path, str(base)]))
+    else:
+        existing_path = _run_worktree_branch_command(CmdArgs(["git", "worktree", "add", path, str(branch)]), branch)
+        if existing_path is not None:
+            return existing_path
+    return path
+
+
 def checkout(branch):
+    config = get_config()
+    if config.use_worktree:
+        info("Checking out branch {} using worktree", branch)
+        path = ensure_worktree(BranchName(str(branch)), create=False)
+        emit_location(path)
+        return
+
     info("Checking out branch {}", branch)
-    run(["git", "checkout", branch], out=True)
+    run(["git", "checkout", branch])
+    emit_location(TOP_LEVEL_DIR)
 
 
 def cmd_branch_up(stack: StackBranchSet, args):
@@ -700,7 +1213,18 @@ def cmd_branch_down(stack: StackBranchSet, args):
 
 
 def create_branch(branch):
-    run(["git", "checkout", "-b", branch, "--track"], out=True)
+    config = get_config()
+    if config.use_worktree:
+        info("Creating worktree branch {}", branch)
+        path = ensure_worktree(BranchName(str(branch)), create=True, base=CURRENT_BRANCH)
+        # Keep stack metadata consistent with non-worktree branch creation.
+        assert CURRENT_BRANCH is not None
+        set_parent(BranchName(str(branch)), CURRENT_BRANCH, set_origin=True)
+        emit_location(path)
+        return
+
+    run(["git", "checkout", "-b", branch, "--track"])
+    emit_location(TOP_LEVEL_DIR)
 
 
 def cmd_branch_new(stack: StackBranchSet, args):
@@ -753,7 +1277,7 @@ def confirm(msg: str = "Proceed?"):
         return
     if not os.isatty(0):
         die("Standard input is not a terminal, use --force option to force action")
-    print()
+    print(file=sys.stderr)
     while True:
         cout("{} [yes/no] ", msg, fg="yellow")
         sys.stderr.flush()
@@ -802,7 +1326,7 @@ def find_issue_marker(name: str) -> Optional[str]:
     return None
 
 
-def create_gh_pr(b: StackBranch, prefix: str):
+def create_gh_pr(b: StackBranch, prefix: str, *, remote_name: str = "origin"):
     cout("Creating PR for {}\n", b.name, fg="green")
     parent_prefix = ""
     if b.parent.name not in STACK_BOTTOMS:
@@ -816,6 +1340,15 @@ def create_gh_pr(b: StackBranch, prefix: str):
         "--base",
         f"{parent_prefix}{b.parent.name}",
     ]
+    maybe_add_gh_repo(cmd, remote_name=remote_name)
+    stdout_is_tty = os.isatty(1)
+    if not stdout_is_tty:
+        # Newer gh requires title/body (or --fill*) when stdout is not a tty.
+        cmd.append("--fill")
+        if IS_TERMINAL:
+            # In shell-wrapper mode stdout may be captured, but stdin/stderr are
+            # interactive; open the editor to preserve interactive PR editing.
+            cmd.append("--editor")
     reviewers = find_reviewers(b)
     issue_id = find_issue_marker(b.name)
     if issue_id:
@@ -846,10 +1379,14 @@ def create_gh_pr(b: StackBranch, prefix: str):
             else:
                 title = out
 
-        title = prompt(
-            (fmt("? ", color=COLOR_STDOUT, fg="green") + fmt("Title ", color=COLOR_STDOUT, style="bold", fg="white")),
-            title,
-        )
+        if IS_TERMINAL:
+            title = prompt(
+                (
+                    fmt("? ", color=COLOR_STDERR, fg="green")
+                    + fmt("Title ", color=COLOR_STDERR, style="bold", fg="white")
+                ),
+                title,
+            )
         cmd.extend(["--title", title.strip()])
     if reviewers:
         logging.debug(f"Adding {len(reviewers)} reviewer(s) to the review")
@@ -969,21 +1506,21 @@ def do_push(
         if pr_action == PR_FIX_BASE:
             cout("Fixing PR base for {}\n", b.name, fg="green")
             assert b.open_pr_info is not None
+            cmd = [
+                "gh",
+                "pr",
+                "edit",
+                str(b.open_pr_info["number"]),
+                "--base",
+                b.parent.name,
+            ]
+            maybe_add_gh_repo(cmd, remote_name=remote_name)
             run(
-                CmdArgs(
-                    [
-                        "gh",
-                        "pr",
-                        "edit",
-                        str(b.open_pr_info["number"]),
-                        "--base",
-                        b.parent.name,
-                    ]
-                ),
+                CmdArgs(cmd),
                 out=True,
             )
         elif pr_action == PR_CREATE:
-            create_gh_pr(b, prefix)
+            create_gh_pr(b, prefix, remote_name=remote_name)
 
     stop_muxed_ssh(remote_name)
 
@@ -1047,8 +1584,38 @@ def get_commits_between(a: Commit, b: Commit):
     return [x.strip() for x in lines.split("\n")]
 
 
+def rebase_branch_onto_parent(b: StackBranch) -> Optional[str]:
+    config = get_config()
+    if config.use_worktree:
+        path = ensure_worktree(b.name, create=False)
+        return run(
+            CmdArgs(["git", "-C", path, "rebase", "--onto", b.parent.name, b.parent_commit]),
+            out=True,
+            check=False,
+        )
+    return run(
+        CmdArgs(["git", "rebase", "--onto", b.parent.name, b.parent_commit, b.name]),
+        out=True,
+        check=False,
+    )
+
+
+def restore_sync_location():
+    config = get_config()
+    if config.use_worktree:
+        emit_location(ensure_worktree(CURRENT_BRANCH, create=False))
+        return
+    run(CmdArgs(["git", "checkout", str(CURRENT_BRANCH)]))
+
+
+def emit_conflicted_sync_location(b: StackBranch):
+    config = get_config()
+    if config.use_worktree:
+        emit_location(ensure_worktree(b.name, create=False))
+
+
 def inner_do_sync(syncs: List[StackBranch], sync_names: List[BranchName]):
-    print()
+    print(file=sys.stderr)
     while syncs:
         with open(TMP_STATE_FILE, "w") as f:
             json.dump({"branch": CURRENT_BRANCH, "sync": sync_names}, f)
@@ -1068,20 +1635,17 @@ def inner_do_sync(syncs: List[StackBranch], sync_names: List[BranchName]):
             )
         else:
             cout("Rebasing {} on top of {}\n", b.name, b.parent.name, fg="green")
-            r = run(
-                CmdArgs(["git", "rebase", "--onto", b.parent.name, b.parent_commit, b.name]),
-                out=True,
-                check=False,
-            )
+            r = rebase_branch_onto_parent(b)
             if r is None:
-                print()
+                emit_conflicted_sync_location(b)
+                print(file=sys.stderr)
                 die(
                     "Automatic rebase failed. Please complete the rebase (fix conflicts; `git rebase --continue`), then run `stacky continue`"
                 )
             b.commit = get_commit(b.name)
         set_parent_commit(b.name, b.parent.commit, b.parent_commit)
         b.parent_commit = b.parent.commit
-    run(CmdArgs(["git", "checkout", str(CURRENT_BRANCH)]))
+    restore_sync_location()
 
 
 def cmd_stack_sync(stack: StackBranchSet, args):
@@ -1299,6 +1863,7 @@ def get_branches_to_delete(forest: BranchesTreeForest) -> List[StackBranch]:
 
 def delete_branches(stack: StackBranchSet, deletes: List[StackBranch]):
     global CURRENT_BRANCH
+    config = get_config()
     # Make sure we're not trying to delete the current branch
     for b in deletes:
         for c in b.children:
@@ -1309,13 +1874,108 @@ def delete_branches(stack: StackBranchSet, deletes: List[StackBranch]):
         if b.name == CURRENT_BRANCH:
             new_branch = next(iter(stack.bottoms))
             info("About to delete current branch, switching to {}", new_branch.name)
-            run(CmdArgs(["git", "checkout", new_branch.name]))
+            if config.use_worktree:
+                # Branches cannot be deleted while checked out in this worktree.
+                # Switch the target worktree to the desired branch, then detach
+                # this worktree and emit the target location for shell wrappers.
+                path = ensure_worktree(new_branch.name, create=False)
+                run(CmdArgs(["git", "-C", path, "checkout", str(new_branch.name)]))
+                run(CmdArgs(["git", "checkout", "--detach"]))
+                current_path = globals().get("TOP_LEVEL_DIR")
+                if current_path:
+                    _recycle_worktree_path(current_path)
+                emit_location(path)
+            else:
+                run(CmdArgs(["git", "checkout", new_branch.name]))
             CURRENT_BRANCH = new_branch.name
+        elif config.use_worktree:
+            branch_worktree = get_worktree_map().get(b.name)
+            if branch_worktree:
+                _recycle_worktree_path(branch_worktree)
         run(CmdArgs(["git", "branch", "-D", b.name]))
 
 
+def cmd_worktree_gc(stack: StackBranchSet, args):  # noqa: ARG001
+    config = get_config()
+    if not config.use_worktree:
+        info("Worktree pooling is disabled (`use_worktree = false`), nothing to GC")
+        return
+    if args.max_spares < 0:
+        die("Invalid --max-spares {}, expected >= 0", args.max_spares)
+    root = get_worktree_root()
+    entries = get_worktree_entries()
+    spares = _list_spare_worktree_paths(root, entries)
+    if len(spares) <= args.max_spares:
+        info("Spare worktrees: {}, max allowed: {} (nothing to remove)", len(spares), args.max_spares)
+        return
+    to_remove = spares[args.max_spares :]
+    for path in to_remove:
+        info("Removing spare worktree {}", path)
+        run(CmdArgs(["git", "worktree", "remove", path]))
+    run(CmdArgs(["git", "worktree", "prune"]))
+
+
+def _checked_out_branch_worktree(branch: BranchName, worktree_map: Dict[BranchName, str]) -> Optional[str]:
+    path = worktree_map.get(branch)
+    if path is not None:
+        return path
+    if branch == CURRENT_BRANCH:
+        return ""
+    return None
+
+
+def _worktree_git_cmd(path: str, args: List[str]) -> CmdArgs:
+    cmd = ["git"]
+    if path:
+        cmd.extend(["-C", path])
+    cmd.extend(args)
+    return CmdArgs(cmd)
+
+
+def stash_checked_out_branch_changes(branch: BranchName, worktree_map: Dict[BranchName, str]) -> bool:
+    path = _checked_out_branch_worktree(branch, worktree_map)
+    if path is None:
+        return False
+    status = run(_worktree_git_cmd(path, ["status", "--porcelain", "--untracked-files=all"]))
+    if not status:
+        return False
+    run(_worktree_git_cmd(path, ["stash", "push", "--include-untracked", "-m", f"stacky update: {branch}"]))
+    return True
+
+
+def restore_checked_out_branch_stash(branch: BranchName, worktree_map: Dict[BranchName, str]):
+    path = _checked_out_branch_worktree(branch, worktree_map)
+    if path is None:
+        return
+    run(_worktree_git_cmd(path, ["stash", "apply", "--index", "stash@{0}"]))
+    run(_worktree_git_cmd(path, ["stash", "drop", "stash@{0}"]))
+
+
+def reset_checked_out_branch(branch: BranchName, worktree_map: Dict[BranchName, str]):
+    path = _checked_out_branch_worktree(branch, worktree_map)
+    if path is not None:
+        run(_worktree_git_cmd(path, ["reset", "--hard", "HEAD"]))
+
+
+def update_bottom_branch(remote: str, branch: BranchName, remote_branch: BranchName, worktree_map: Dict[BranchName, str]):
+    stashed = stash_checked_out_branch_changes(branch, worktree_map)
+    run(
+        CmdArgs(
+            [
+                "git",
+                "update-ref",
+                "refs/heads/{}".format(branch),
+                "refs/remotes/{}/{}".format(remote, remote_branch),
+            ]
+        )
+    )
+    reset_checked_out_branch(branch, worktree_map)
+    if stashed:
+        restore_checked_out_branch_stash(branch, worktree_map)
+
+
 def cmd_update(stack: StackBranchSet, args):
-    remote = "origin"
+    remote = args.remote_name
     start_muxed_ssh(remote)
     info("Fetching from {}", remote)
     run(CmdArgs(["git", "fetch", remote]))
@@ -1323,19 +1983,10 @@ def cmd_update(stack: StackBranchSet, args):
     # TODO(tudor): We should rebase instead of silently dropping
     # everything you have on local master. Oh well.
     global CURRENT_BRANCH
+    config = get_config()
+    worktree_map = get_worktree_map() if config.use_worktree else {}
     for b in stack.bottoms:
-        run(
-            CmdArgs(
-                [
-                    "git",
-                    "update-ref",
-                    "refs/heads/{}".format(b.name),
-                    "refs/remotes/{}/{}".format(remote, b.remote_branch),
-                ]
-            )
-        )
-        if b.name == CURRENT_BRANCH:
-            run(CmdArgs(["git", "reset", "--hard", "HEAD"]))
+        update_bottom_branch(remote, b.name, b.remote_branch, worktree_map)
 
     # We treat origin as the source of truth for bottom branches (master), and
     # the local repo as the source of truth for everything else. So we can only
@@ -1432,7 +2083,8 @@ def cmd_adopt(stack: StackBranch, args):
         main_branch = get_real_stack_bottom()
 
         if config.change_to_main and main_branch is not None:
-            run(CmdArgs(["git", "checkout", main_branch]))
+            if not config.use_worktree:
+                run(CmdArgs(["git", "checkout", main_branch]))
             CURRENT_BRANCH = main_branch
         else:
             die(
@@ -1533,11 +2185,11 @@ def cmd_land(stack: StackBranchSet, args):
             fg="yellow",
         )
 
-    msg = fmt("- Will land PR #{} (", pr["number"], color=COLOR_STDOUT)
-    msg += fmt("{}", pr["url"], color=COLOR_STDOUT, fg="blue")
-    msg += fmt(") for branch {}", b.name, color=COLOR_STDOUT)
-    msg += fmt(" into branch {}\n", b.parent.name, color=COLOR_STDOUT)
-    sys.stdout.write(msg)
+    msg = fmt("- Will land PR #{} (", pr["number"], color=COLOR_STDERR)
+    msg += fmt("{}", pr["url"], color=COLOR_STDERR, fg="blue")
+    msg += fmt(") for branch {}", b.name, color=COLOR_STDERR)
+    msg += fmt(" into branch {}\n", b.parent.name, color=COLOR_STDERR)
+    sys.stderr.write(msg)
 
     if not args.force:
         confirm()
@@ -1545,10 +2197,11 @@ def cmd_land(stack: StackBranchSet, args):
     v = run(CmdArgs(["git", "rev-parse", b.name]))
     assert v is not None
     head_commit = Commit(v)
-    cmd = CmdArgs(["gh", "pr", "merge", b.name, "--squash", "--match-head-commit", head_commit])
+    cmd = ["gh", "pr", "merge", b.name, "--squash", "--match-head-commit", head_commit]
+    maybe_add_gh_repo(cmd)
     if args.auto:
         cmd.append("--auto")
-    run(cmd, out=True)
+    run(CmdArgs(cmd), out=True)
     cout("\n✓ Success! Run `stacky update` to update local state.\n", fg="green")
 
 
@@ -1556,6 +2209,12 @@ def main():
     logging.basicConfig(format=_LOGGING_FORMAT, level=logging.INFO)
     try:
         parser = ArgumentParser(description="Handle git stacks")
+        parser.add_argument(
+            "--version",
+            action="version",
+            version=get_version_string(),
+            help="Print version information",
+        )
         parser.add_argument(
             "--log-level",
             default="info",
@@ -1571,7 +2230,7 @@ def main():
         parser.add_argument(
             "--remote-name",
             "-r",
-            default="origin",
+            default=None,
             help="name of the git remote where branches will be pushed",
         )
 
@@ -1687,6 +2346,87 @@ def main():
         update_parser.add_argument("--force", "-f", action="store_true", help="Bypass confirmation")
         update_parser.set_defaults(func=cmd_update)
 
+        # worktree
+        worktree_parser = subparsers.add_parser("worktree", help="Manage stacky worktree pool")
+        worktree_subparsers = worktree_parser.add_subparsers(required=True, dest="worktree_command")
+        worktree_gc_parser = worktree_subparsers.add_parser("gc", help="Garbage collect spare pooled worktrees")
+        worktree_gc_parser.add_argument(
+            "--max-spares",
+            type=int,
+            default=2,
+            help="Maximum number of spare pooled worktrees to keep",
+        )
+        worktree_gc_parser.set_defaults(func=cmd_worktree_gc)
+
+        # shell
+        shell_parser = subparsers.add_parser("shell", help="Generate shell integration scripts")
+        shell_subparsers = shell_parser.add_subparsers(required=True, dest="shell_command")
+
+        shell_completion_parser = shell_subparsers.add_parser("completion", help="Print shell completion script")
+        shell_completion_parser.add_argument(
+            "--shell",
+            choices=["bash", "zsh"],
+            default=_default_shell(),
+            help="Target shell",
+        )
+        shell_completion_parser.add_argument(
+            "--stacky-command",
+            default="stacky",
+            help="Command name used to invoke stacky",
+        )
+        shell_completion_parser.add_argument(
+            "--completion-target",
+            action="append",
+            default=[],
+            help="Additional command/function name to enable completion for (repeatable)",
+        )
+        shell_completion_parser.set_defaults(func=cmd_shell_completion)
+
+        shell_wrapper_parser = shell_subparsers.add_parser("wrapper", help="Print auto-cd shell wrapper function")
+        shell_wrapper_parser.add_argument(
+            "--function-name",
+            default="st",
+            help="Name of the shell wrapper function",
+        )
+        shell_wrapper_parser.add_argument(
+            "--stacky-command",
+            default="stacky",
+            help="Command name used to invoke stacky",
+        )
+        shell_wrapper_parser.set_defaults(func=cmd_shell_wrapper)
+
+        shell_setup_parser = shell_subparsers.add_parser(
+            "setup", help="Write completion and wrapper scripts to a directory"
+        )
+        shell_setup_parser.add_argument(
+            "--shell",
+            choices=["bash", "zsh"],
+            default=_default_shell(),
+            help="Target shell",
+        )
+        shell_setup_parser.add_argument(
+            "--output-dir",
+            default=os.path.expanduser("~/.stacky/shell"),
+            help="Directory where generated scripts will be written",
+        )
+        shell_setup_parser.add_argument(
+            "--function-name",
+            default="st",
+            help="Name of the shell wrapper function",
+        )
+        shell_setup_parser.add_argument(
+            "--stacky-command",
+            default="stacky",
+            help="Command name used to invoke stacky",
+        )
+        shell_setup_parser.add_argument(
+            "--completion-target",
+            action="append",
+            default=[],
+            help="Additional command/function name to enable completion for (repeatable)",
+        )
+        shell_setup_parser.set_defaults(func=cmd_shell_setup)
+
         # import
         import_parser = subparsers.add_parser("import", help="Import Graphite stack")
         import_parser.add_argument("--force", "-f", action="store_true", help="Bypass confirmation")
@@ -1733,11 +2473,21 @@ def main():
         args = parser.parse_args()
         logging.basicConfig(format=_LOGGING_FORMAT, level=LOGLEVELS[args.log_level], force=True)
 
+        if args.command == "shell":
+            args.func(args)
+            return
+
         p = run_always_return(CmdArgs(["git", "rev-parse", "--show-toplevel"]))
         global TOP_LEVEL_DIR
         TOP_LEVEL_DIR = os.path.realpath(p)
+        common_git_dir = os.path.realpath(run_always_return(CmdArgs(["git", "rev-parse", "--git-common-dir"])))
+        global REPO_TOP_LEVEL_DIR
+        if os.path.basename(common_git_dir) == ".git":
+            REPO_TOP_LEVEL_DIR = os.path.dirname(common_git_dir)
+        else:
+            REPO_TOP_LEVEL_DIR = TOP_LEVEL_DIR
 
-        mangled_state_prefix = TOP_LEVEL_DIR.replace("_", "_U").replace("~", "_T").replace("/", "_S")
+        mangled_state_prefix = REPO_TOP_LEVEL_DIR.replace("_", "_U").replace("~", "_T").replace("/", "_S")
         global STATE_FILE
         STATE_FILE = os.path.expanduser(f"~/.stacky.state.{mangled_state_prefix}")
 
@@ -1749,6 +2499,8 @@ def main():
         global CONFIG
         CONFIG = read_config()
         config = get_config()
+        if args.remote_name is None:
+            args.remote_name = config.remote_name or "origin"
 
         global COLOR_STDERR
         global COLOR_STDOUT
@@ -1771,8 +2523,9 @@ def main():
                     state = json.load(f)
             except FileNotFoundError as e:  # noqa: F841
                 die("No previous command in progress")
-            branch = state["branch"]
-            run(["git", "checkout", branch])
+            branch = BranchName(state["branch"])
+            if not config.use_worktree:
+                run(CmdArgs(["git", "checkout", branch]))
             CURRENT_BRANCH = branch
             if CURRENT_BRANCH not in stack.stack:
                 die("Current branch {} is not in a stack", CURRENT_BRANCH)
@@ -1788,7 +2541,8 @@ def main():
                 main_branch = get_real_stack_bottom()
 
                 if config.change_to_main and main_branch is not None:
-                    run(["git", "checkout", main_branch])
+                    if not config.use_worktree:
+                        run(["git", "checkout", main_branch])
                     CURRENT_BRANCH = main_branch
                 else:
                     die("Current branch {} is not in a stack", CURRENT_BRANCH)
