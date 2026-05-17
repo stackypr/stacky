@@ -1446,11 +1446,13 @@ def cmd_adopt(stack: StackBranch, args):
     if config.change_to_adopted:
         run(CmdArgs(["git", "checkout", branch]))
 
-
 def cmd_rebuild(stack: StackBranch, args):
     config = get_config()
+    overrides_str = args.override or []
     branch = args.name
     global CURRENT_BRANCH
+
+    overrides = dict(s.split(":", 1) for s in overrides_str)
 
     main_branch = get_real_stack_bottom()
     assert main_branch is not None
@@ -1458,11 +1460,16 @@ def cmd_rebuild(stack: StackBranch, args):
     target_stack: list[BranchName] = []
     while branch != main_branch:
         target_stack.append(branch)
-        cout(f"Getting PR info for branch {branch}\n", fg="green")
-        pr_info = get_pr_info(branch).open
-        if pr_info is None:
-            die(f"Branch {branch} has no open PR")
-        branch = BranchName(pr_info["baseRefName"])
+        if branch in overrides:
+            cout(f"Using override for branch {branch}\n", fg="green")
+            branch_str = overrides[branch]
+        else:
+            cout(f"Getting PR info for branch {branch}\n", fg="green")
+            pr_info = get_pr_info(branch).open
+            if pr_info is None:
+                die(f"Branch {branch} has no open PR")
+            branch_str = pr_info["baseRefName"]
+        branch = BranchName(branch_str)
 
     target_stack.reverse()
 
@@ -1700,6 +1707,7 @@ def main():
 
         # rebuild
         rebuild_parser = subparsers.add_parser("rebuild", help="Rebuild one stack")
+        rebuild_parser.add_argument("--override", action="append", help="Override parent branches, list of child:parent")
         rebuild_parser.add_argument("name", help="Top of stack branch name")
         rebuild_parser.set_defaults(func=cmd_rebuild)
 
