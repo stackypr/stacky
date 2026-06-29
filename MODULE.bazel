@@ -5,6 +5,20 @@ module(
 
 bazel_dep(name = "rules_python", version = "1.8.3")
 
+single_version_override(
+    module_name = "protobuf",
+    patches = ["//patches:protobuf-no-kotlin.patch"],
+    patch_strip = 1,
+    version = "29.0",
+)
+
+single_version_override(
+    module_name = "rules_python",
+    patches = ["//patches:rules-python-no-stardoc.patch"],
+    patch_strip = 1,
+    version = "1.8.3",
+)
+
 pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
 pip.parse(
     hub_name = "pypi",
