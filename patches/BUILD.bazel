@@ -1,0 +1,4 @@
+exports_files([
+    "protobuf-no-kotlin.patch",
+    "rules-python-no-stardoc.patch",
+])
