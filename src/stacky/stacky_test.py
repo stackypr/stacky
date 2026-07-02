@@ -129,6 +129,108 @@ class TestWorktreeSupport(unittest.TestCase):
             os.unlink(path)
         self.assertEqual(cfg.remote_name, "upstream")
 
+    def test_read_one_config_git_commands(self):
+        cfg = stacky_module.StackyConfig()
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write(
+                "[UI]\n"
+                "git_command = alternategit cache\n"
+                "[git_commands]\n"
+                "fetch = mygit fetch fromcache\n"
+                "push = myothergit push params\n"
+            )
+            path = f.name
+        try:
+            cfg.read_one_config(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(cfg.git_command, "alternategit cache")
+        self.assertEqual(cfg.git_commands["fetch"], "mygit fetch fromcache")
+        self.assertEqual(cfg.git_commands["push"], "myothergit push params")
+
+    def test_resolve_command_replaces_git_with_configured_prefix(self):
+        stacky_module.configure_git_commands("alternategit cache", {})
+        try:
+            self.assertEqual(
+                stacky_module.resolve_command(stacky_module.CmdArgs(["git", "fetch", "origin"])),
+                ["alternategit", "cache", "fetch", "origin"],
+            )
+            self.assertEqual(
+                stacky_module.resolve_command(stacky_module.CmdArgs(["gh", "auth", "status"])),
+                ["gh", "auth", "status"],
+            )
+        finally:
+            stacky_module.configure_git_commands(None, {})
+
+    def test_resolve_command_uses_subcommand_override(self):
+        stacky_module.configure_git_commands(
+            None,
+            {
+                "fetch": "mygit fetch fromcache",
+                "push": "myothergit push params",
+            },
+        )
+        try:
+            self.assertEqual(
+                stacky_module.resolve_command(stacky_module.CmdArgs(["git", "fetch", "origin", "--prune"])),
+                ["mygit", "fetch", "fromcache", "origin", "--prune"],
+            )
+            self.assertEqual(
+                stacky_module.resolve_command(
+                    stacky_module.CmdArgs(["git", "push", "-f", "origin", "feature:feature"])
+                ),
+                ["myothergit", "push", "params", "-f", "origin", "feature:feature"],
+            )
+            self.assertEqual(
+                stacky_module.resolve_command(stacky_module.CmdArgs(["git", "status", "--short"])),
+                ["git", "status", "--short"],
+            )
+        finally:
+            stacky_module.configure_git_commands(None, {})
+
+    def test_resolve_command_keeps_global_git_args_before_subcommand_override(self):
+        stacky_module.configure_git_commands(None, {"fetch": "mygit fetch fromcache"})
+        try:
+            self.assertEqual(
+                stacky_module.resolve_command(stacky_module.CmdArgs(["git", "-C", "/repo/wt", "fetch", "origin"])),
+                ["mygit", "-C", "/repo/wt", "fetch", "fromcache", "origin"],
+            )
+        finally:
+            stacky_module.configure_git_commands(None, {})
+
+    def test_parse_git_command_overrides(self):
+        default_command, subcommand_commands = stacky_module.parse_git_command_overrides(
+            [
+                "alternategit cache",
+                "fetch=mygit fetch fromcache",
+                "push=myothergit push params",
+            ]
+        )
+        self.assertEqual(default_command, "alternategit cache")
+        self.assertEqual(
+            subcommand_commands,
+            {
+                "fetch": "mygit fetch fromcache",
+                "push": "myothergit push params",
+            },
+        )
+
+    @mock.patch.object(stacky_module.subprocess, "run")
+    def test_run_multiline_uses_alternate_git_command(self, subprocess_run_mock):
+        subprocess_run_mock.return_value = subprocess.CompletedProcess(
+            args=["alternategit", "cache", "fetch", "origin"],
+            returncode=0,
+            stdout=b"ok\n",
+            stderr=b"",
+        )
+        stacky_module.configure_git_commands("alternategit cache", {})
+        try:
+            self.assertEqual(stacky_module.run(stacky_module.CmdArgs(["git", "fetch", "origin"])), "ok")
+        finally:
+            stacky_module.configure_git_commands(None, {})
+        subprocess_run_mock.assert_called_once()
+        self.assertEqual(subprocess_run_mock.call_args.args[0], ["alternategit", "cache", "fetch", "origin"])
+
     def test_get_gh_repo_parses_https_remote(self):
         with mock.patch.object(stacky_module, "run", side_effect=[None, "https://github.com/org/repo.git"]):
             self.assertEqual(stacky_module.get_gh_repo("upstream"), "org/repo")
@@ -225,6 +327,28 @@ class TestWorktreeSupport(unittest.TestCase):
             stacky_module.BranchName("feature"),
         )
         self.assertEqual(path, "/repo/.stacky/worktrees/checkout-6")
+
+    @mock.patch.object(stacky_module.subprocess, "run")
+    def test_run_worktree_branch_command_uses_alternate_git_command(self, subprocess_run_mock):
+        subprocess_run_mock.return_value = subprocess.CompletedProcess(
+            args=["alternategit", "cache", "worktree", "add", "/wt/feature", "feature"],
+            returncode=0,
+            stdout=b"",
+            stderr=b"",
+        )
+        stacky_module.configure_git_commands("alternategit cache", {})
+        try:
+            path = stacky_module._run_worktree_branch_command(
+                stacky_module.CmdArgs(["git", "worktree", "add", "/wt/feature", "feature"]),
+                stacky_module.BranchName("feature"),
+            )
+        finally:
+            stacky_module.configure_git_commands(None, {})
+        self.assertIsNone(path)
+        self.assertEqual(
+            subprocess_run_mock.call_args.args[0],
+            ["alternategit", "cache", "worktree", "add", "/wt/feature", "feature"],
+        )
 
     def test_get_worktree_root_uses_repo_top_level(self):
         cfg = stacky_module.StackyConfig(use_worktree=True, worktree_root=".stacky/worktrees")

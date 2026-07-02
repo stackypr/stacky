@@ -164,6 +164,8 @@ class StackyConfig:
     change_to_adopted: bool = False
     share_ssh_session: bool = False
     remote_name: Optional[str] = None
+    git_command: Optional[str] = None
+    git_commands: Dict[str, str] = dataclasses.field(default_factory=dict)
     use_worktree: bool = False
     worktree_root: Optional[str] = None
 
@@ -176,11 +178,17 @@ class StackyConfig:
             self.change_to_adopted = rawconfig.getboolean("UI", "change_to_adopted", fallback=self.change_to_adopted)
             self.share_ssh_session = rawconfig.getboolean("UI", "share_ssh_session", fallback=self.share_ssh_session)
             self.remote_name = rawconfig.get("UI", "remote_name", fallback=self.remote_name)
+            self.git_command = rawconfig.get("UI", "git_command", fallback=self.git_command)
             self.use_worktree = rawconfig.getboolean("UI", "use_worktree", fallback=self.use_worktree)
             self.worktree_root = rawconfig.get("UI", "worktree_root", fallback=self.worktree_root)
+        if rawconfig.has_section("git_commands"):
+            for command, replacement in rawconfig.items("git_commands"):
+                self.git_commands[command] = replacement
 
 
 CONFIG: Optional["StackyConfig"] = None
+GIT_COMMAND_PREFIX: List[str] = ["git"]
+GIT_SUBCOMMAND_PREFIXES: Dict[str, List[str]] = {}
 
 
 def get_config() -> StackyConfig:
@@ -480,6 +488,98 @@ def _check_returncode(sp: subprocess.CompletedProcess, cmd: CmdArgs):
         die("Exited with status {}: {}. Stderr was:\n{}", rc, shlex.join(cmd), stderr)
 
 
+def set_git_command(command: Optional[str]):
+    global GIT_COMMAND_PREFIX
+    if not command:
+        GIT_COMMAND_PREFIX = ["git"]
+        return
+    try:
+        parts = shlex.split(command)
+    except ValueError as e:
+        die("Invalid git_command {!r}: {}", command, e)
+    if not parts:
+        die("Invalid git_command {!r}: expected a command", command)
+    GIT_COMMAND_PREFIX = parts
+
+
+def set_git_subcommand_commands(commands: Dict[str, str]):
+    global GIT_SUBCOMMAND_PREFIXES
+    prefixes: Dict[str, List[str]] = {}
+    for subcommand, command in commands.items():
+        try:
+            parts = shlex.split(command)
+        except ValueError as e:
+            die("Invalid git command override for {!r}: {}", subcommand, e)
+        if not parts:
+            die("Invalid git command override for {!r}: expected a command", subcommand)
+        prefixes[subcommand] = parts
+    GIT_SUBCOMMAND_PREFIXES = prefixes
+
+
+def configure_git_commands(default_command: Optional[str], subcommand_commands: Dict[str, str]):
+    set_git_command(default_command)
+    set_git_subcommand_commands(subcommand_commands)
+
+
+def parse_git_command_overrides(values: Optional[List[str]]) -> Tuple[Optional[str], Dict[str, str]]:
+    default_command: Optional[str] = None
+    subcommand_commands: Dict[str, str] = {}
+    for value in values or []:
+        subcommand, sep, command = value.partition("=")
+        if sep and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", subcommand):
+            subcommand_commands[subcommand] = command
+        else:
+            default_command = value
+    return default_command, subcommand_commands
+
+
+def _split_git_command(cmd: CmdArgs) -> Optional[Tuple[List[str], str, List[str]]]:
+    if not cmd or cmd[0] != "git":
+        return None
+
+    global_args: List[str] = []
+    i = 1
+    while i < len(cmd):
+        arg = cmd[i]
+        if arg == "--":
+            return None
+        if arg in ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--html-path"):
+            if i + 1 >= len(cmd):
+                return None
+            global_args.extend([arg, cmd[i + 1]])
+            i += 2
+            continue
+        if (
+            arg.startswith("--git-dir=")
+            or arg.startswith("--work-tree=")
+            or arg.startswith("--namespace=")
+            or arg.startswith("--exec-path=")
+            or arg.startswith("-c")
+        ):
+            global_args.append(arg)
+            i += 1
+            continue
+        if arg.startswith("-"):
+            global_args.append(arg)
+            i += 1
+            continue
+        return global_args, arg, list(cmd[i + 1 :])
+    return None
+
+
+def resolve_command(cmd: CmdArgs) -> CmdArgs:
+    parsed = _split_git_command(cmd)
+    if parsed is None:
+        return cmd
+    global_args, subcommand, subcommand_args = parsed
+    if subcommand in GIT_SUBCOMMAND_PREFIXES:
+        prefix = GIT_SUBCOMMAND_PREFIXES[subcommand]
+        return CmdArgs(prefix[0:1] + global_args + prefix[1:] + subcommand_args)
+    if cmd and cmd[0] == "git":
+        return CmdArgs(GIT_COMMAND_PREFIX + list(cmd[1:]))
+    return cmd
+
+
 def _existing_worktree_from_git_error(stderr: str, branch: BranchName) -> Optional[str]:
     match = re.search(r"fatal: '([^']+)' is already (?:used by worktree|checked out) at '([^']+)'", stderr)
     if match is None:
@@ -490,6 +590,7 @@ def _existing_worktree_from_git_error(stderr: str, branch: BranchName) -> Option
 
 
 def run_multiline(cmd: CmdArgs, *, check: bool = True, null: bool = True, out: bool = False) -> Optional[str]:
+    cmd = resolve_command(cmd)
     debug("Running: {}", shlex.join(cmd))
     sys.stdout.flush()
     sys.stderr.flush()
@@ -1118,6 +1219,7 @@ def _list_spare_worktree_paths(root: str, entries: List[WorktreeEntry]) -> List[
 
 
 def _run_worktree_branch_command(cmd: CmdArgs, branch: BranchName) -> Optional[str]:
+    cmd = resolve_command(cmd)
     debug("Running: {}", shlex.join(cmd))
     sys.stdout.flush()
     sys.stderr.flush()
@@ -2244,6 +2346,15 @@ def main():
             default=None,
             help="name of the git remote where branches will be pushed",
         )
+        parser.add_argument(
+            "--git-command",
+            action="append",
+            default=[],
+            help=(
+                'command prefix to use instead of "git", or SUBCOMMAND=COMMAND to override one git subcommand '
+                "(repeatable)"
+            ),
+        )
 
         subparsers = parser.add_subparsers(required=True, dest="command")
 
@@ -2483,6 +2594,9 @@ def main():
 
         args = parser.parse_args()
         logging.basicConfig(format=_LOGGING_FORMAT, level=LOGLEVELS[args.log_level], force=True)
+        cli_git_command, cli_git_commands = parse_git_command_overrides(args.git_command)
+        if cli_git_command is not None or cli_git_commands:
+            configure_git_commands(cli_git_command, cli_git_commands)
 
         if args.command == "shell":
             args.func(args)
@@ -2510,6 +2624,9 @@ def main():
         global CONFIG
         CONFIG = read_config()
         config = get_config()
+        git_commands = dict(config.git_commands)
+        git_commands.update(cli_git_commands)
+        configure_git_commands(cli_git_command if cli_git_command is not None else config.git_command, git_commands)
         if args.remote_name is None:
             args.remote_name = config.remote_name or "origin"
 
