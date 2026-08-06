@@ -120,13 +120,13 @@ class TestPush(unittest.TestCase):
             stacky_module.do_push(self.make_forest("feature"), force=True)
 
         self.assertFalse(any(call.args[0][:2] == ["git", "checkout"] for call in run_mock.call_args_list))
-        run_mock.assert_any_call(
-            stacky_module.CmdArgs(["git", "push", "-f", "origin", "feature:feature"]), out=True
-        )
+        run_mock.assert_any_call(stacky_module.CmdArgs(["git", "push", "-f", "origin", "feature:feature"]), out=True)
 
     def test_push_checkouts_each_branch_and_restores_original_branch(self):
+        cfg = stacky_module.StackyConfig(use_worktree=False)
         with (
             mock.patch.object(stacky_module, "CURRENT_BRANCH", stacky_module.BranchName("original"), create=True),
+            mock.patch.object(stacky_module, "get_config", return_value=cfg),
             mock.patch.object(stacky_module, "start_muxed_ssh"),
             mock.patch.object(stacky_module, "stop_muxed_ssh"),
             mock.patch.object(stacky_module, "print_forest"),
@@ -144,7 +144,41 @@ class TestPush(unittest.TestCase):
             ]
         )
 
+    def test_push_checkout_runs_pushes_in_existing_worktrees(self):
+        cfg = stacky_module.StackyConfig(use_worktree=True)
+        worktrees = {
+            stacky_module.BranchName("first"): "/wt/first",
+            stacky_module.BranchName("second"): "/wt/second",
+        }
+
+        with (
+            mock.patch.object(stacky_module, "CURRENT_BRANCH", stacky_module.BranchName("original"), create=True),
+            mock.patch.object(stacky_module, "get_config", return_value=cfg),
+            mock.patch.object(stacky_module, "start_muxed_ssh"),
+            mock.patch.object(stacky_module, "stop_muxed_ssh"),
+            mock.patch.object(stacky_module, "print_forest"),
+            mock.patch.object(stacky_module, "ensure_worktree", side_effect=lambda branch, **_: worktrees[branch]),
+            mock.patch.object(stacky_module, "run", return_value=None) as run_mock,
+        ):
+            stacky_module.do_push(self.make_forest("first", "second"), force=True, checkout_before_push=True)
+
+        run_mock.assert_has_calls(
+            [
+                mock.call(
+                    stacky_module.CmdArgs(["git", "-C", "/wt/first", "push", "-f", "origin", "first:first"]),
+                    out=True,
+                ),
+                mock.call(
+                    stacky_module.CmdArgs(["git", "-C", "/wt/second", "push", "-f", "origin", "second:second"]),
+                    out=True,
+                ),
+            ]
+        )
+        self.assertFalse(any(call.args[0][:2] == ["git", "checkout"] for call in run_mock.call_args_list))
+
     def test_push_restores_original_branch_after_push_error(self):
+        cfg = stacky_module.StackyConfig(use_worktree=False)
+
         def fake_run(cmd, **kwargs):
             if cmd[:2] == ["git", "push"]:
                 raise stacky_module.ExitException("push failed")
@@ -152,6 +186,7 @@ class TestPush(unittest.TestCase):
 
         with (
             mock.patch.object(stacky_module, "CURRENT_BRANCH", stacky_module.BranchName("original"), create=True),
+            mock.patch.object(stacky_module, "get_config", return_value=cfg),
             mock.patch.object(stacky_module, "start_muxed_ssh"),
             mock.patch.object(stacky_module, "stop_muxed_ssh"),
             mock.patch.object(stacky_module, "print_forest"),

@@ -1498,24 +1498,29 @@ def do_push(
         prefix = f"{val.split(':')[1].split('/')[0]}:"
     else:
         prefix = ""
-    checked_out_branch = CURRENT_BRANCH if checkout_before_push else None
+    config = get_config()
+    use_worktree_checkout = checkout_before_push and config.use_worktree
+    checked_out_branch = CURRENT_BRANCH if checkout_before_push and not use_worktree_checkout else None
     try:
         for b, push, pr_action in actions:
             if push:
-                if checkout_before_push and checked_out_branch != b.name:
+                push_cmd = ["git"]
+                if use_worktree_checkout:
+                    push_cmd.extend(["-C", ensure_worktree(b.name, create=False)])
+                elif checkout_before_push and checked_out_branch != b.name:
                     run(CmdArgs(["git", "checkout", b.name]))
                     checked_out_branch = b.name
                 cout("Pushing {}\n", b.name, fg="green")
+                push_cmd.extend(
+                    [
+                        "push",
+                        "-f",
+                        b.remote,
+                        "{}:{}".format(b.name, b.remote_branch),
+                    ]
+                )
                 run(
-                    CmdArgs(
-                        [
-                            "git",
-                            "push",
-                            "-f",
-                            b.remote,
-                            "{}:{}".format(b.name, b.remote_branch),
-                        ]
-                    ),
+                    CmdArgs(push_cmd),
                     out=True,
                 )
             if pr_action == PR_FIX_BASE:
@@ -1537,7 +1542,7 @@ def do_push(
             elif pr_action == PR_CREATE:
                 create_gh_pr(b, prefix, remote_name=remote_name)
     finally:
-        if checkout_before_push and checked_out_branch != CURRENT_BRANCH:
+        if checkout_before_push and not use_worktree_checkout and checked_out_branch != CURRENT_BRANCH:
             run(CmdArgs(["git", "checkout", CURRENT_BRANCH]))
 
     stop_muxed_ssh(remote_name)
