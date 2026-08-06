@@ -1417,6 +1417,7 @@ def do_push(
     force: bool = False,
     pr: bool = False,
     remote_name: str = "origin",
+    checkout_before_push: bool = False,
 ):
     start_muxed_ssh(remote_name)
     if pr:
@@ -1497,39 +1498,47 @@ def do_push(
         prefix = f"{val.split(':')[1].split('/')[0]}:"
     else:
         prefix = ""
-    for b, push, pr_action in actions:
-        if push:
-            cout("Pushing {}\n", b.name, fg="green")
-            run(
-                CmdArgs(
-                    [
-                        "git",
-                        "push",
-                        "-f",
-                        b.remote,
-                        "{}:{}".format(b.name, b.remote_branch),
-                    ]
-                ),
-                out=True,
-            )
-        if pr_action == PR_FIX_BASE:
-            cout("Fixing PR base for {}\n", b.name, fg="green")
-            assert b.open_pr_info is not None
-            cmd = [
-                "gh",
-                "pr",
-                "edit",
-                str(b.open_pr_info["number"]),
-                "--base",
-                b.parent.name,
-            ]
-            maybe_add_gh_repo(cmd, remote_name=remote_name)
-            run(
-                CmdArgs(cmd),
-                out=True,
-            )
-        elif pr_action == PR_CREATE:
-            create_gh_pr(b, prefix, remote_name=remote_name)
+    checked_out_branch = CURRENT_BRANCH if checkout_before_push else None
+    try:
+        for b, push, pr_action in actions:
+            if push:
+                if checkout_before_push and checked_out_branch != b.name:
+                    run(CmdArgs(["git", "checkout", b.name]))
+                    checked_out_branch = b.name
+                cout("Pushing {}\n", b.name, fg="green")
+                run(
+                    CmdArgs(
+                        [
+                            "git",
+                            "push",
+                            "-f",
+                            b.remote,
+                            "{}:{}".format(b.name, b.remote_branch),
+                        ]
+                    ),
+                    out=True,
+                )
+            if pr_action == PR_FIX_BASE:
+                cout("Fixing PR base for {}\n", b.name, fg="green")
+                assert b.open_pr_info is not None
+                cmd = [
+                    "gh",
+                    "pr",
+                    "edit",
+                    str(b.open_pr_info["number"]),
+                    "--base",
+                    b.parent.name,
+                ]
+                maybe_add_gh_repo(cmd, remote_name=remote_name)
+                run(
+                    CmdArgs(cmd),
+                    out=True,
+                )
+            elif pr_action == PR_CREATE:
+                create_gh_pr(b, prefix, remote_name=remote_name)
+    finally:
+        if checkout_before_push and checked_out_branch != CURRENT_BRANCH:
+            run(CmdArgs(["git", "checkout", CURRENT_BRANCH]))
 
     stop_muxed_ssh(remote_name)
 
@@ -1540,6 +1549,7 @@ def cmd_stack_push(stack: StackBranchSet, args):
         force=args.force,
         pr=args.pr,
         remote_name=args.remote_name,
+        checkout_before_push=args.checkout,
     )
 
 
@@ -1719,6 +1729,7 @@ def cmd_upstack_push(stack: StackBranchSet, args):
         force=args.force,
         pr=args.pr,
         remote_name=args.remote_name,
+        checkout_before_push=args.checkout,
     )
 
 
@@ -1770,6 +1781,7 @@ def cmd_downstack_push(stack: StackBranchSet, args):
         force=args.force,
         pr=args.pr,
         remote_name=args.remote_name,
+        checkout_before_push=args.checkout,
     )
 
 
@@ -2302,6 +2314,7 @@ def main():
         stack_push_parser = stack_subparsers.add_parser("push", help="Push")
         stack_push_parser.add_argument("--force", "-f", action="store_true", help="Bypass confirmation")
         stack_push_parser.add_argument("--no-pr", dest="pr", action="store_false", help="Skip Create PRs")
+        stack_push_parser.add_argument("--checkout", action="store_true", help="Check out each branch before pushing")
         stack_push_parser.set_defaults(func=cmd_stack_push)
 
         stack_sync_parser = stack_subparsers.add_parser("sync", help="Sync")
@@ -2323,6 +2336,7 @@ def main():
         upstack_push_parser = upstack_subparsers.add_parser("push", help="Push")
         upstack_push_parser.add_argument("--force", "-f", action="store_true", help="Bypass confirmation")
         upstack_push_parser.add_argument("--no-pr", dest="pr", action="store_false", help="Skip Create PRs")
+        upstack_push_parser.add_argument("--checkout", action="store_true", help="Check out each branch before pushing")
         upstack_push_parser.set_defaults(func=cmd_upstack_push)
 
         upstack_sync_parser = upstack_subparsers.add_parser("sync", help="Sync")
@@ -2347,6 +2361,9 @@ def main():
         downstack_push_parser = downstack_subparsers.add_parser("push", help="Push")
         downstack_push_parser.add_argument("--force", "-f", action="store_true", help="Bypass confirmation")
         downstack_push_parser.add_argument("--no-pr", dest="pr", action="store_false", help="Skip Create PRs")
+        downstack_push_parser.add_argument(
+            "--checkout", action="store_true", help="Check out each branch before pushing"
+        )
         downstack_push_parser.set_defaults(func=cmd_downstack_push)
 
         downstack_sync_parser = downstack_subparsers.add_parser("sync", help="Sync")
@@ -2469,6 +2486,7 @@ def main():
         push_parser = subparsers.add_parser("push", help="Alias for downstack push")
         push_parser.add_argument("--force", "-f", action="store_true", help="Bypass confirmation")
         push_parser.add_argument("--no-pr", dest="pr", action="store_false", help="Skip Create PRs")
+        push_parser.add_argument("--checkout", action="store_true", help="Check out each branch before pushing")
         push_parser.set_defaults(func=cmd_downstack_push)
 
         sync_parser = subparsers.add_parser("sync", help="Alias for stack sync")

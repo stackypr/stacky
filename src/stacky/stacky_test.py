@@ -91,6 +91,91 @@ class TestInit(unittest.TestCase):
             self.assertTrue(stacky_module.args_need_gh(Namespace(command=command)))
 
 
+class TestPush(unittest.TestCase):
+    @staticmethod
+    def make_forest(*branch_names):
+        parent = SimpleNamespace(name=stacky_module.BranchName("main"))
+        branches = [
+            SimpleNamespace(
+                name=stacky_module.BranchName(name),
+                parent=parent,
+                remote="origin",
+                remote_branch=stacky_module.BranchName(name),
+                is_synced_with_parent=lambda: True,
+                is_synced_with_remote=lambda: False,
+            )
+            for name in branch_names
+        ]
+        return stacky_module.BranchesTreeForest(
+            [stacky_module.BranchesTree({branch.name: (branch, stacky_module.BranchesTree({})) for branch in branches})]
+        )
+
+    def test_push_does_not_checkout_branches_by_default(self):
+        with (
+            mock.patch.object(stacky_module, "start_muxed_ssh"),
+            mock.patch.object(stacky_module, "stop_muxed_ssh"),
+            mock.patch.object(stacky_module, "print_forest"),
+            mock.patch.object(stacky_module, "run", return_value=None) as run_mock,
+        ):
+            stacky_module.do_push(self.make_forest("feature"), force=True)
+
+        self.assertFalse(any(call.args[0][:2] == ["git", "checkout"] for call in run_mock.call_args_list))
+        run_mock.assert_any_call(
+            stacky_module.CmdArgs(["git", "push", "-f", "origin", "feature:feature"]), out=True
+        )
+
+    def test_push_checkouts_each_branch_and_restores_original_branch(self):
+        with (
+            mock.patch.object(stacky_module, "CURRENT_BRANCH", stacky_module.BranchName("original"), create=True),
+            mock.patch.object(stacky_module, "start_muxed_ssh"),
+            mock.patch.object(stacky_module, "stop_muxed_ssh"),
+            mock.patch.object(stacky_module, "print_forest"),
+            mock.patch.object(stacky_module, "run", return_value=None) as run_mock,
+        ):
+            stacky_module.do_push(self.make_forest("first", "second"), force=True, checkout_before_push=True)
+
+        run_mock.assert_has_calls(
+            [
+                mock.call(stacky_module.CmdArgs(["git", "checkout", "first"])),
+                mock.call(stacky_module.CmdArgs(["git", "push", "-f", "origin", "first:first"]), out=True),
+                mock.call(stacky_module.CmdArgs(["git", "checkout", "second"])),
+                mock.call(stacky_module.CmdArgs(["git", "push", "-f", "origin", "second:second"]), out=True),
+                mock.call(stacky_module.CmdArgs(["git", "checkout", "original"])),
+            ]
+        )
+
+    def test_push_restores_original_branch_after_push_error(self):
+        def fake_run(cmd, **kwargs):
+            if cmd[:2] == ["git", "push"]:
+                raise stacky_module.ExitException("push failed")
+            return None
+
+        with (
+            mock.patch.object(stacky_module, "CURRENT_BRANCH", stacky_module.BranchName("original"), create=True),
+            mock.patch.object(stacky_module, "start_muxed_ssh"),
+            mock.patch.object(stacky_module, "stop_muxed_ssh"),
+            mock.patch.object(stacky_module, "print_forest"),
+            mock.patch.object(stacky_module, "run", side_effect=fake_run) as run_mock,
+        ):
+            with self.assertRaises(stacky_module.ExitException):
+                stacky_module.do_push(self.make_forest("feature"), force=True, checkout_before_push=True)
+
+        self.assertEqual(run_mock.call_args, mock.call(stacky_module.CmdArgs(["git", "checkout", "original"])))
+
+    def test_all_push_commands_accept_checkout_option(self):
+        for command in (["push"], ["ds", "push"], ["stack", "push"], ["upstack", "push"]):
+            with self.subTest(command=command):
+                with (
+                    mock.patch.object(stacky_module.sys, "argv", ["stacky", *command, "--help"]),
+                    mock.patch.object(stacky_module.sys, "stdout", new=io.StringIO()) as output,
+                ):
+                    with self.assertRaises(SystemExit) as exit_context:
+                        stacky_module.main()
+
+                self.assertEqual(exit_context.exception.code, 0)
+                self.assertIn("--checkout", output.getvalue())
+
+
 class TestWorktreeSupport(unittest.TestCase):
     def test_parse_worktree_list(self):
         out = (

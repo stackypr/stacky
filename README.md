@@ -43,7 +43,7 @@ Syntax is as follows:
 - Based on the first argument (`stack` vs `upstack` vs `downstack`), the following commands operate on the entire current stack, everything upstack from the current PR (inclusive), or everything downstack from the current PR:
     - `stacky stack info [--pr]`
     - `stacky stack sync`: sync (rebase) branches in the stack on top of their parents
-    - `stacky stack push [--no-pr]`: push to origin, optionally not creating PRs if they don’t exist
+    - `stacky stack push [--no-pr] [--checkout]`: push to origin, optionally not creating PRs if they don’t exist; `--checkout` checks out each branch before pushing and restores the original branch afterward
 - `stacky upstack onto <target>`: restack the current branch (and everything upstack from it) on top of another branch (like `gt us onto`), useful if you’ve made a separate PR that you want to include in your stack
 - `stacky continue`: continue an interrupted stacky sync command (because of conflicts)
 - `stacky update`: will pull changes from github and update master, and deletes branches that have been merged into master
