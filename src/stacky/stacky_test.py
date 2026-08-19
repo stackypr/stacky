@@ -91,6 +91,96 @@ class TestInit(unittest.TestCase):
             self.assertTrue(stacky_module.args_need_gh(Namespace(command=command)))
 
 
+class TestGitHubAuthentication(unittest.TestCase):
+    def test_read_one_config_use_gh_auth(self):
+        cfg = stacky_module.StackyConfig()
+        with tempfile.NamedTemporaryFile("w", delete=False) as config_file:
+            config_file.write("[UI]\nuse_gh_auth = true\n")
+            path = config_file.name
+        try:
+            cfg.read_one_config(path)
+        finally:
+            os.unlink(path)
+
+        self.assertTrue(cfg.use_gh_auth)
+
+    def test_git_command_is_unchanged_when_gh_auth_is_disabled(self):
+        cmd = stacky_module.CmdArgs(["git", "fetch", "origin"])
+        with mock.patch.object(stacky_module, "CONFIG", stacky_module.StackyConfig()):
+            self.assertEqual(stacky_module._git_command_with_gh_auth(cmd), cmd)
+
+    def test_git_command_uses_gh_credential_helper_and_rewrites_ssh_remotes(self):
+        cmd = stacky_module.CmdArgs(["git", "-C", "/repo/worktree", "push", "origin", "feature"])
+        with mock.patch.object(stacky_module, "CONFIG", stacky_module.StackyConfig(use_gh_auth=True)):
+            configured_cmd = stacky_module._git_command_with_gh_auth(cmd)
+
+        self.assertEqual(
+            configured_cmd,
+            [
+                "git",
+                "-c",
+                "credential.https://github.com.helper=",
+                "-c",
+                "credential.https://github.com.helper=!gh auth git-credential",
+                "-c",
+                "url.https://github.com/.insteadOf=git@github.com:",
+                "-c",
+                "url.https://github.com/.insteadOf=ssh://git@github.com/",
+                "-C",
+                "/repo/worktree",
+                "push",
+                "origin",
+                "feature",
+            ],
+        )
+
+    def test_gh_command_is_unchanged_when_gh_auth_is_enabled(self):
+        cmd = stacky_module.CmdArgs(["gh", "auth", "status"])
+        with mock.patch.object(stacky_module, "CONFIG", stacky_module.StackyConfig(use_gh_auth=True)):
+            self.assertEqual(stacky_module._git_command_with_gh_auth(cmd), cmd)
+
+    def test_run_multiline_applies_gh_auth_to_git_subprocesses(self):
+        cmd = stacky_module.CmdArgs(["git", "fetch", "origin"])
+        completed = subprocess.CompletedProcess(args=cmd, returncode=0, stdout=b"fetched\n", stderr=b"")
+        with (
+            mock.patch.object(stacky_module, "CONFIG", stacky_module.StackyConfig(use_gh_auth=True)),
+            mock.patch.object(stacky_module.subprocess, "run", return_value=completed) as subprocess_run,
+        ):
+            self.assertEqual(stacky_module.run_multiline(cmd), "fetched\n")
+
+        configured_cmd = subprocess_run.call_args.args[0]
+        self.assertIn("credential.https://github.com.helper=!gh auth git-credential", configured_cmd)
+        self.assertEqual(configured_cmd[-2:], ["fetch", "origin"])
+
+    def test_push_without_pr_checks_gh_auth_only_when_enabled(self):
+        push_args = (
+            Namespace(command="push", pr=False),
+            Namespace(command="stack", stack_command="push", pr=False),
+            Namespace(command="upstack", upstack_command="push", pr=False),
+            Namespace(command="downstack", downstack_command="push", pr=False),
+        )
+        for enabled in (False, True):
+            with mock.patch.object(stacky_module, "CONFIG", stacky_module.StackyConfig(use_gh_auth=enabled)):
+                for args in push_args:
+                    with self.subTest(enabled=enabled, command=args.command):
+                        self.assertEqual(stacky_module.args_need_gh(args), enabled)
+                self.assertFalse(stacky_module.args_need_gh(Namespace(command="info", pr=False)))
+                self.assertFalse(stacky_module.args_need_gh(Namespace(command="sync")))
+
+    def test_gh_auth_disables_shared_ssh_sessions(self):
+        cfg = stacky_module.StackyConfig(share_ssh_session=True, use_gh_auth=True)
+        with (
+            mock.patch.object(stacky_module, "get_config", return_value=cfg),
+            mock.patch.object(stacky_module, "get_remote_type") as get_remote_type,
+            mock.patch.object(stacky_module.subprocess, "Popen") as popen,
+        ):
+            stacky_module.start_muxed_ssh()
+            stacky_module.stop_muxed_ssh()
+
+        get_remote_type.assert_not_called()
+        popen.assert_not_called()
+
+
 class TestPush(unittest.TestCase):
     @staticmethod
     def make_forest(*branch_names):

@@ -30,6 +30,15 @@ After which `stacky` can be directly run with `./src/stacky/stacky.py`. We would
 ## Accessing Github
 Stacky doesn't use any git or Github APIs. It expects `git` and `gh` cli commands to work and be properly configured. For instructions on installing the github cli `gh` please read their [documentation](https://cli.github.com/manual/).
 
+To reuse your existing `gh` authentication for Git operations, add the following to your repository's or home directory's `.stackyconfig`:
+
+```ini
+[UI]
+use_gh_auth = true
+```
+
+When enabled, Stacky uses `gh auth git-credential` for GitHub HTTPS authentication and temporarily rewrites GitHub SSH remote URLs to HTTPS for its Git commands. Your repository's remote URL and Git configuration are not changed.
+
 ## Usage
 `stacky` stores all information locally, within your git repository
 Syntax is as follows:
@@ -178,6 +187,7 @@ List of parameters for each sections:
  * change_to_main: boolean with a default value of `False`, by default `stacky` will stop doing action is you are not in a valid stack (ie. a branch that was created or adopted by stacky), when set to `True` `stacky` will first change to `main` or `master` *when* the current branch is not a valid stack.
  * change_to_adopted: boolean with a default value of `False`, when set to `True` `stacky` will change the current branch to the adopted one.
  * share_ssh_session: boolean with a default value of `False`, when set to `True` `stacky` will create a shared `ssh` session to the `github.com` server. This is useful when you are pushing a stack of diff and you have some kind of 2FA on your ssh key like the ed25519-sk.
+ * use_gh_auth: boolean with a default value of `False`, when set to `True` `stacky` uses your existing `gh` authentication for GitHub Git operations, including remotes configured with SSH URLs. This takes precedence over `share_ssh_session`.
  * remote_name: string with a default value of `origin`, sets the default git remote used by commands such as `push` and `update`. You can still override it per command with `--remote-name` / `-r`.
  * use_worktree: boolean with a default value of `False`, when set to `True` branch checkout and branch creation use dedicated git worktrees.
  * worktree_root: string with a default value of `.stacky/worktrees`, controls where stacky stores managed worktrees.
