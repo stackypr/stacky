@@ -163,6 +163,7 @@ class StackyConfig:
     change_to_main: bool = False
     change_to_adopted: bool = False
     share_ssh_session: bool = False
+    use_gh_auth: bool = False
     remote_name: Optional[str] = None
     use_worktree: bool = False
     worktree_root: Optional[str] = None
@@ -175,6 +176,7 @@ class StackyConfig:
             self.change_to_main = rawconfig.getboolean("UI", "change_to_main", fallback=self.change_to_main)
             self.change_to_adopted = rawconfig.getboolean("UI", "change_to_adopted", fallback=self.change_to_adopted)
             self.share_ssh_session = rawconfig.getboolean("UI", "share_ssh_session", fallback=self.share_ssh_session)
+            self.use_gh_auth = rawconfig.getboolean("UI", "use_gh_auth", fallback=self.use_gh_auth)
             self.remote_name = rawconfig.get("UI", "remote_name", fallback=self.remote_name)
             self.use_worktree = rawconfig.getboolean("UI", "use_worktree", fallback=self.use_worktree)
             self.worktree_root = rawconfig.get("UI", "worktree_root", fallback=self.worktree_root)
@@ -452,7 +454,7 @@ class ExitException(BaseException):
 
 def stop_muxed_ssh(remote: str = "origin"):
     config = get_config()
-    if config.share_ssh_session:
+    if config.share_ssh_session and not config.use_gh_auth:
         hostish = get_remote_type(remote)
         if hostish is not None:
             cmd = gen_ssh_mux_cmd()
@@ -489,7 +491,28 @@ def _existing_worktree_from_git_error(stderr: str, branch: BranchName) -> Option
     return match.group(2)
 
 
+def _git_command_with_gh_auth(cmd: CmdArgs) -> CmdArgs:
+    if not cmd or cmd[0] != "git" or CONFIG is None or not CONFIG.use_gh_auth:
+        return cmd
+
+    return CmdArgs(
+        [
+            "git",
+            "-c",
+            "credential.https://github.com.helper=",
+            "-c",
+            "credential.https://github.com.helper=!gh auth git-credential",
+            "-c",
+            "url.https://github.com/.insteadOf=git@github.com:",
+            "-c",
+            "url.https://github.com/.insteadOf=ssh://git@github.com/",
+            *cmd[1:],
+        ]
+    )
+
+
 def run_multiline(cmd: CmdArgs, *, check: bool = True, null: bool = True, out: bool = False) -> Optional[str]:
+    cmd = _git_command_with_gh_auth(cmd)
     debug("Running: {}", shlex.join(cmd))
     sys.stdout.flush()
     sys.stderr.flush()
@@ -934,6 +957,12 @@ def init_gh():
 def args_need_gh(args) -> bool:
     if getattr(args, "pr", False):
         return True
+    if CONFIG is not None and CONFIG.use_gh_auth:
+        if args.command == "push" or any(
+            getattr(args, subcommand, None) == "push"
+            for subcommand in ("stack_command", "upstack_command", "downstack_command")
+        ):
+            return True
     return args.command in ("update", "import", "rebuild", "land")
 
 
@@ -1118,6 +1147,7 @@ def _list_spare_worktree_paths(root: str, entries: List[WorktreeEntry]) -> List[
 
 
 def _run_worktree_branch_command(cmd: CmdArgs, branch: BranchName) -> Optional[str]:
+    cmd = _git_command_with_gh_auth(cmd)
     debug("Running: {}", shlex.join(cmd))
     sys.stdout.flush()
     sys.stderr.flush()
@@ -1837,7 +1867,7 @@ def gen_ssh_mux_cmd() -> List[str]:
 
 def start_muxed_ssh(remote: str = "origin"):
     config = get_config()
-    if not config.share_ssh_session:
+    if not config.share_ssh_session or config.use_gh_auth:
         return
     hostish = get_remote_type(remote)
     if hostish is not None:
