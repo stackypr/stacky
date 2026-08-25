@@ -316,9 +316,7 @@ class TestPush(unittest.TestCase):
                             mock.patch.object(stacky_module, "CONFIG", cfg),
                             mock.patch.object(stacky_module, "read_config", return_value=cfg),
                             mock.patch.object(stacky_module, "CURRENT_BRANCH", "original", create=True),
-                            mock.patch.object(
-                                stacky_module, "run_always_return", side_effect=["/repo", "/repo/.git"]
-                            ),
+                            mock.patch.object(stacky_module, "run_always_return", side_effect=["/repo", "/repo/.git"]),
                             mock.patch.object(stacky_module, "init_git"),
                             mock.patch.object(stacky_module, "StackBranchSet", return_value=stack),
                             mock.patch.object(stacky_module, "load_all_stacks"),
