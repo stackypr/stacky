@@ -182,6 +182,19 @@ class TestGitHubAuthentication(unittest.TestCase):
 
 
 class TestPush(unittest.TestCase):
+    def test_read_one_config_checkout_before_push(self):
+        cfg = stacky_module.StackyConfig()
+        for contents, expected in (
+            ("[UI]\ncheckout_before_push = true\n", True),
+            ("[UI]\nskip_confirm = true\n", True),
+            ("[UI]\ncheckout_before_push = false\n", False),
+        ):
+            with self.subTest(contents=contents), tempfile.NamedTemporaryFile("w") as config_file:
+                config_file.write(contents)
+                config_file.flush()
+                cfg.read_one_config(config_file.name)
+                self.assertEqual(cfg.checkout_before_push, expected)
+
     @staticmethod
     def make_forest(*branch_names):
         parent = SimpleNamespace(name=stacky_module.BranchName("main"))
@@ -202,6 +215,7 @@ class TestPush(unittest.TestCase):
 
     def test_push_does_not_checkout_branches_by_default(self):
         with (
+            mock.patch.object(stacky_module, "get_config", return_value=stacky_module.StackyConfig()),
             mock.patch.object(stacky_module, "start_muxed_ssh"),
             mock.patch.object(stacky_module, "stop_muxed_ssh"),
             mock.patch.object(stacky_module, "print_forest"),
@@ -213,7 +227,7 @@ class TestPush(unittest.TestCase):
         run_mock.assert_any_call(stacky_module.CmdArgs(["git", "push", "-f", "origin", "feature:feature"]), out=True)
 
     def test_push_checkouts_each_branch_and_restores_original_branch(self):
-        cfg = stacky_module.StackyConfig(use_worktree=False)
+        cfg = stacky_module.StackyConfig(use_worktree=False, checkout_before_push=True)
         with (
             mock.patch.object(stacky_module, "CURRENT_BRANCH", stacky_module.BranchName("original"), create=True),
             mock.patch.object(stacky_module, "get_config", return_value=cfg),
@@ -222,7 +236,7 @@ class TestPush(unittest.TestCase):
             mock.patch.object(stacky_module, "print_forest"),
             mock.patch.object(stacky_module, "run", return_value=None) as run_mock,
         ):
-            stacky_module.do_push(self.make_forest("first", "second"), force=True, checkout_before_push=True)
+            stacky_module.do_push(self.make_forest("first", "second"), force=True)
 
         run_mock.assert_has_calls(
             [
@@ -235,7 +249,7 @@ class TestPush(unittest.TestCase):
         )
 
     def test_push_checkout_runs_pushes_in_existing_worktrees(self):
-        cfg = stacky_module.StackyConfig(use_worktree=True)
+        cfg = stacky_module.StackyConfig(use_worktree=True, checkout_before_push=True)
         worktrees = {
             stacky_module.BranchName("first"): "/wt/first",
             stacky_module.BranchName("second"): "/wt/second",
@@ -250,7 +264,7 @@ class TestPush(unittest.TestCase):
             mock.patch.object(stacky_module, "ensure_worktree", side_effect=lambda branch, **_: worktrees[branch]),
             mock.patch.object(stacky_module, "run", return_value=None) as run_mock,
         ):
-            stacky_module.do_push(self.make_forest("first", "second"), force=True, checkout_before_push=True)
+            stacky_module.do_push(self.make_forest("first", "second"), force=True)
 
         run_mock.assert_has_calls(
             [
@@ -287,6 +301,43 @@ class TestPush(unittest.TestCase):
 
         self.assertEqual(run_mock.call_args, mock.call(stacky_module.CmdArgs(["git", "checkout", "original"])))
 
+    def test_all_push_commands_use_config_and_checkout_overrides(self):
+        forest = self.make_forest("feature")
+        stack = SimpleNamespace(stack={"original": None})
+        for command in (["push"], ["ds", "push"], ["stack", "push"], ["upstack", "push"]):
+            for configured in (False, True):
+                for options, expected in (([], configured), (["--checkout"], True), (["--no-checkout"], False)):
+                    with self.subTest(command=command, configured=configured, options=options):
+                        cfg = stacky_module.StackyConfig(checkout_before_push=configured)
+                        with (
+                            mock.patch.object(
+                                stacky_module.sys, "argv", ["stacky", *command, "--force", "--no-pr", *options]
+                            ),
+                            mock.patch.object(stacky_module, "CONFIG", cfg),
+                            mock.patch.object(stacky_module, "read_config", return_value=cfg),
+                            mock.patch.object(stacky_module, "CURRENT_BRANCH", "original", create=True),
+                            mock.patch.object(stacky_module, "run_always_return", side_effect=["/repo", "/repo/.git"]),
+                            mock.patch.object(stacky_module, "init_git"),
+                            mock.patch.object(stacky_module, "StackBranchSet", return_value=stack),
+                            mock.patch.object(stacky_module, "load_all_stacks"),
+                            mock.patch.object(stacky_module, "get_current_stack_as_forest", return_value=forest),
+                            mock.patch.object(stacky_module, "get_current_upstack_as_forest", return_value=forest),
+                            mock.patch.object(stacky_module, "get_current_downstack_as_forest", return_value=forest),
+                            mock.patch.object(stacky_module, "print_forest"),
+                            mock.patch.object(stacky_module, "run", return_value=None) as run_mock,
+                            mock.patch.object(stacky_module.os, "remove"),
+                        ):
+                            stacky_module.main()
+
+                        expected_commands = [["git", "push", "-f", "origin", "feature:feature"]]
+                        if expected:
+                            expected_commands.insert(0, ["git", "checkout", "feature"])
+                            expected_commands.append(["git", "checkout", "original"])
+                        self.assertEqual(
+                            [call.args[0] for call in run_mock.call_args_list],
+                            [["git", "config", "remote.origin.gh-resolved"], *expected_commands],
+                        )
+
     def test_all_push_commands_accept_checkout_option(self):
         for command in (["push"], ["ds", "push"], ["stack", "push"], ["upstack", "push"]):
             with self.subTest(command=command):
@@ -299,6 +350,7 @@ class TestPush(unittest.TestCase):
 
                 self.assertEqual(exit_context.exception.code, 0)
                 self.assertIn("--checkout", output.getvalue())
+                self.assertIn("--no-checkout", output.getvalue())
 
 
 class TestWorktreeSupport(unittest.TestCase):
