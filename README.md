@@ -52,7 +52,7 @@ Syntax is as follows:
 - Based on the first argument (`stack` vs `upstack` vs `downstack`), the following commands operate on the entire current stack, everything upstack from the current PR (inclusive), or everything downstack from the current PR:
     - `stacky stack info [--pr]`
     - `stacky stack sync`: sync (rebase) branches in the stack on top of their parents
-    - `stacky stack push [--no-pr] [--checkout]`: push to origin, optionally not creating PRs if they don’t exist; `--checkout` checks out each branch before pushing and restores the original branch afterward
+    - `stacky stack push [--no-pr] [--checkout | --no-checkout]`: push to origin, optionally not creating PRs if they don’t exist; checkout behavior defaults to `checkout_before_push` in the config. `--checkout` checks out each branch before pushing and restores the original branch afterward; `--no-checkout` disables it for this command
 - `stacky upstack onto <target>`: restack the current branch (and everything upstack from it) on top of another branch (like `gt us onto`), useful if you’ve made a separate PR that you want to include in your stack
 - `stacky continue`: continue an interrupted stacky sync command (because of conflicts)
 - `stacky update`: will pull changes from github and update master, and deletes branches that have been merged into master
@@ -189,6 +189,7 @@ List of parameters for each sections:
  * share_ssh_session: boolean with a default value of `False`, when set to `True` `stacky` will create a shared `ssh` session to the `github.com` server. This is useful when you are pushing a stack of diff and you have some kind of 2FA on your ssh key like the ed25519-sk.
  * use_gh_auth: boolean with a default value of `False`, when set to `True` `stacky` uses your existing `gh` authentication for GitHub Git operations, including remotes configured with SSH URLs. This takes precedence over `share_ssh_session`.
  * remote_name: string with a default value of `origin`, sets the default git remote used by commands such as `push` and `update`. You can still override it per command with `--remote-name` / `-r`.
+ * checkout_before_push: boolean with a default value of `False`, when set to `True` all push commands check out each branch before pushing and restore the original branch afterward. With `use_worktree = true`, pushes run in each branch's worktree instead. Override it per command with `--checkout` or `--no-checkout`.
  * use_worktree: boolean with a default value of `False`, when set to `True` branch checkout and branch creation use dedicated git worktrees.
  * worktree_root: string with a default value of `.stacky/worktrees`, controls where stacky stores managed worktrees.
 

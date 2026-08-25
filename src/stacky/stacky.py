@@ -167,6 +167,7 @@ class StackyConfig:
     remote_name: Optional[str] = None
     use_worktree: bool = False
     worktree_root: Optional[str] = None
+    checkout_before_push: bool = False
 
     def read_one_config(self, config_path: str):
         rawconfig = configparser.ConfigParser()
@@ -180,6 +181,9 @@ class StackyConfig:
             self.remote_name = rawconfig.get("UI", "remote_name", fallback=self.remote_name)
             self.use_worktree = rawconfig.getboolean("UI", "use_worktree", fallback=self.use_worktree)
             self.worktree_root = rawconfig.get("UI", "worktree_root", fallback=self.worktree_root)
+            self.checkout_before_push = rawconfig.getboolean(
+                "UI", "checkout_before_push", fallback=self.checkout_before_push
+            )
 
 
 CONFIG: Optional["StackyConfig"] = None
@@ -1447,7 +1451,7 @@ def do_push(
     force: bool = False,
     pr: bool = False,
     remote_name: str = "origin",
-    checkout_before_push: bool = False,
+    checkout_before_push: Optional[bool] = None,
 ):
     start_muxed_ssh(remote_name)
     if pr:
@@ -1529,6 +1533,8 @@ def do_push(
     else:
         prefix = ""
     config = get_config()
+    if checkout_before_push is None:
+        checkout_before_push = config.checkout_before_push
     use_worktree_checkout = checkout_before_push and config.use_worktree
     checked_out_branch = CURRENT_BRANCH if checkout_before_push and not use_worktree_checkout else None
     try:
@@ -2349,7 +2355,6 @@ def main():
         stack_push_parser = stack_subparsers.add_parser("push", help="Push")
         stack_push_parser.add_argument("--force", "-f", action="store_true", help="Bypass confirmation")
         stack_push_parser.add_argument("--no-pr", dest="pr", action="store_false", help="Skip Create PRs")
-        stack_push_parser.add_argument("--checkout", action="store_true", help="Check out each branch before pushing")
         stack_push_parser.set_defaults(func=cmd_stack_push)
 
         stack_sync_parser = stack_subparsers.add_parser("sync", help="Sync")
@@ -2371,7 +2376,6 @@ def main():
         upstack_push_parser = upstack_subparsers.add_parser("push", help="Push")
         upstack_push_parser.add_argument("--force", "-f", action="store_true", help="Bypass confirmation")
         upstack_push_parser.add_argument("--no-pr", dest="pr", action="store_false", help="Skip Create PRs")
-        upstack_push_parser.add_argument("--checkout", action="store_true", help="Check out each branch before pushing")
         upstack_push_parser.set_defaults(func=cmd_upstack_push)
 
         upstack_sync_parser = upstack_subparsers.add_parser("sync", help="Sync")
@@ -2396,9 +2400,6 @@ def main():
         downstack_push_parser = downstack_subparsers.add_parser("push", help="Push")
         downstack_push_parser.add_argument("--force", "-f", action="store_true", help="Bypass confirmation")
         downstack_push_parser.add_argument("--no-pr", dest="pr", action="store_false", help="Skip Create PRs")
-        downstack_push_parser.add_argument(
-            "--checkout", action="store_true", help="Check out each branch before pushing"
-        )
         downstack_push_parser.set_defaults(func=cmd_downstack_push)
 
         downstack_sync_parser = downstack_subparsers.add_parser("sync", help="Sync")
@@ -2521,8 +2522,19 @@ def main():
         push_parser = subparsers.add_parser("push", help="Alias for downstack push")
         push_parser.add_argument("--force", "-f", action="store_true", help="Bypass confirmation")
         push_parser.add_argument("--no-pr", dest="pr", action="store_false", help="Skip Create PRs")
-        push_parser.add_argument("--checkout", action="store_true", help="Check out each branch before pushing")
         push_parser.set_defaults(func=cmd_downstack_push)
+
+        for push_command_parser in (stack_push_parser, upstack_push_parser, downstack_push_parser, push_parser):
+            checkout_group = push_command_parser.add_mutually_exclusive_group()
+            checkout_group.add_argument(
+                "--checkout",
+                action="store_true",
+                help="Check out each branch before pushing (default: checkout_before_push config)",
+            )
+            checkout_group.add_argument(
+                "--no-checkout", dest="checkout", action="store_false", help="Do not check out branches before pushing"
+            )
+            push_command_parser.set_defaults(checkout=None)
 
         sync_parser = subparsers.add_parser("sync", help="Alias for stack sync")
         sync_parser.set_defaults(func=cmd_stack_sync)
