@@ -109,6 +109,7 @@ COLOR_STDERR: bool = os.isatty(2)
 IS_TERMINAL: bool = os.isatty(0) and os.isatty(2)
 CURRENT_BRANCH: BranchName
 STACK_BOTTOMS: FrozenSet[BranchName] = frozenset([BranchName("master"), BranchName("main")])
+STACK_PARENT_REF_PREFIX = "refs/stack-parent/"
 TOP_LEVEL_DIR: str
 REPO_TOP_LEVEL_DIR: str
 
@@ -615,7 +616,14 @@ def _git_command_with_gh_auth(cmd: CmdArgs) -> CmdArgs:
     )
 
 
-def run_multiline(cmd: CmdArgs, *, check: bool = True, null: bool = True, out: bool = False) -> Optional[str]:
+def run_multiline(
+    cmd: CmdArgs,
+    *,
+    check: bool = True,
+    null: bool = True,
+    out: bool = False,
+    input_text: Optional[str] = None,
+) -> Optional[str]:
     cmd = _git_command_with_gh_auth(cmd)
     cmd = resolve_command(cmd)
     debug("Running: {}", shlex.join(cmd))
@@ -623,6 +631,7 @@ def run_multiline(cmd: CmdArgs, *, check: bool = True, null: bool = True, out: b
     sys.stderr.flush()
     sp = subprocess.run(
         cmd,
+        input=input_text.encode("UTF-8") if input_text is not None else None,
         stdout=1 if out else subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -691,12 +700,38 @@ def get_stack_parent_branch(branch: BranchName) -> Optional[BranchName]:  # type
 
 def get_stack_parent_commit(branch: BranchName) -> Optional[Commit]:  # type: ignore [return]
     c = run(
-        CmdArgs(["git", "rev-parse", "refs/stack-parent/{}".format(branch)]),
+        CmdArgs(["git", "rev-parse", "{}{}".format(STACK_PARENT_REF_PREFIX, branch)]),
         check=False,
     )
 
     if c is not None:
         return Commit(c)
+
+
+def get_stack_parent_branches() -> List[BranchName]:
+    refs = run_multiline(CmdArgs(["git", "for-each-ref", "--format", "%(refname)", STACK_PARENT_REF_PREFIX]))
+    assert refs is not None
+    return [BranchName(remove_prefix(ref, STACK_PARENT_REF_PREFIX)) for ref in refs.split("\n") if ref]
+
+
+def delete_stack_parent_ref(branch: BranchName):
+    run(CmdArgs(["git", "update-ref", "-d", "{}{}".format(STACK_PARENT_REF_PREFIX, branch)]))
+
+
+def delete_stack_parent_refs(branches: List[BranchName]):
+    if not branches:
+        return
+    commands = "".join("delete {}{}\n".format(STACK_PARENT_REF_PREFIX, branch) for branch in branches)
+    run_multiline(CmdArgs(["git", "update-ref", "--stdin"]), input_text=commands)
+
+
+def vacuum_stack_parent_refs() -> List[BranchName]:
+    local_branches = set(get_all_branches())
+    stale_branches = [branch for branch in get_stack_parent_branches() if branch not in local_branches]
+    for branch in stale_branches:
+        info("Removing stale stack-parent state for {}", branch)
+    delete_stack_parent_refs(stale_branches)
+    return stale_branches
 
 
 def infer_stack_parent_branch(branch: BranchName, parent_commit: Commit) -> Optional[BranchName]:
@@ -1377,7 +1412,7 @@ def cmd_branch_new(stack: StackBranchSet, args):
     assert b.commit
     name = args.name
     create_branch(name)
-    run(CmdArgs(["git", "update-ref", "refs/stack-parent/{}".format(name), b.commit, ""]))
+    run(CmdArgs(["git", "update-ref", "{}{}".format(STACK_PARENT_REF_PREFIX, name), b.commit, ""]))
 
 
 def cmd_branch_checkout(stack: StackBranchSet, args):
@@ -1732,7 +1767,7 @@ def set_parent_commit(branch: BranchName, new_commit: Commit, prev_commit: Optio
     cmd = [
         "git",
         "update-ref",
-        "refs/stack-parent/{}".format(branch),
+        "{}{}".format(STACK_PARENT_REF_PREFIX, branch),
         new_commit,
     ]
     if prev_commit is not None:
@@ -2057,6 +2092,15 @@ def delete_branches(stack: StackBranchSet, deletes: List[StackBranch]):
             if branch_worktree:
                 _recycle_worktree_path(branch_worktree)
         run(CmdArgs(["git", "branch", "-D", b.name]))
+        delete_stack_parent_ref(b.name)
+
+
+def cmd_vacuum(stack: StackBranchSet, args):  # noqa: ARG001
+    stale_branches = vacuum_stack_parent_refs()
+    if stale_branches:
+        info("Removed {} stale stack-parent ref(s)", len(stale_branches))
+    else:
+        info("No stale stack-parent refs found")
 
 
 def cmd_worktree_gc(stack: StackBranchSet, args):  # noqa: ARG001
@@ -2524,6 +2568,10 @@ def main():
         update_parser = subparsers.add_parser("update", help="Update repo")
         update_parser.add_argument("--force", "-f", action="store_true", help="Bypass confirmation")
         update_parser.set_defaults(func=cmd_update)
+
+        # vacuum
+        vacuum_parser = subparsers.add_parser("vacuum", help="Remove stale Stacky state")
+        vacuum_parser.set_defaults(func=cmd_vacuum)
 
         # worktree
         worktree_parser = subparsers.add_parser("worktree", help="Manage stacky worktree pool")
