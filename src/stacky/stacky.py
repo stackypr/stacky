@@ -2096,18 +2096,38 @@ def _worktree_git_cmd(path: str, args: List[str]) -> CmdArgs:
     return CmdArgs(cmd)
 
 
+def stash_checked_out_branch_changes(branch: BranchName, worktree_map: Dict[BranchName, str]) -> bool:
+    path = _checked_out_branch_worktree(branch, worktree_map)
+    if path is None:
+        return False
+    status = run(_worktree_git_cmd(path, ["status", "--porcelain", "--untracked-files=all"]))
+    if not status:
+        return False
+    run(_worktree_git_cmd(path, ["stash", "push", "--include-untracked", "-m", f"stacky update: {branch}"]))
+    return True
+
+
+def restore_checked_out_branch_stash(branch: BranchName, worktree_map: Dict[BranchName, str]):
+    path = _checked_out_branch_worktree(branch, worktree_map)
+    if path is None:
+        return
+    run(_worktree_git_cmd(path, ["stash", "apply", "--index", "stash@{0}"]))
+    run(_worktree_git_cmd(path, ["stash", "drop", "stash@{0}"]))
+
+
 def update_checked_out_branch(branch: BranchName, target: str, worktree_map: Dict[BranchName, str]):
     path = _checked_out_branch_worktree(branch, worktree_map)
     if path is None:
         return
-    # The bottom-branch checkout is assumed clean. Update only paths that differ
-    # between its old tree and the fetched tree instead of scanning and resetting it.
+    # Update only paths that differ between the old and fetched trees instead of
+    # resetting the entire checkout.
     run(_worktree_git_cmd(path, ["read-tree", "-u", "-m", str(branch), target]))
 
 
 def update_bottom_branch(
     remote: str, branch: BranchName, remote_branch: BranchName, worktree_map: Dict[BranchName, str]
 ):
+    stashed = stash_checked_out_branch_changes(branch, worktree_map)
     target = "refs/remotes/{}/{}".format(remote, remote_branch)
     update_checked_out_branch(branch, target, worktree_map)
     run(
@@ -2120,6 +2140,8 @@ def update_bottom_branch(
             ]
         )
     )
+    if stashed:
+        restore_checked_out_branch_stash(branch, worktree_map)
 
 
 def cmd_update(stack: StackBranchSet, args):

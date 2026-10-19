@@ -785,7 +785,7 @@ class TestWorktreeSupport(unittest.TestCase):
         )
 
     def test_update_bottom_branch_updates_clean_worktree_before_ref(self):
-        with mock.patch.object(stacky_module, "run") as run_mock:
+        with mock.patch.object(stacky_module, "run", side_effect=["", None, None]) as run_mock:
             stacky_module.update_bottom_branch(
                 "upstream",
                 stacky_module.BranchName("main"),
@@ -795,6 +795,9 @@ class TestWorktreeSupport(unittest.TestCase):
 
         run_mock.assert_has_calls(
             [
+                mock.call(
+                    stacky_module.CmdArgs(["git", "-C", "/wt/main", "status", "--porcelain", "--untracked-files=all"])
+                ),
                 mock.call(
                     stacky_module.CmdArgs(
                         [
@@ -812,6 +815,58 @@ class TestWorktreeSupport(unittest.TestCase):
                 mock.call(
                     stacky_module.CmdArgs(["git", "update-ref", "refs/heads/main", "refs/remotes/upstream/main"])
                 ),
+            ]
+        )
+
+    def test_update_bottom_branch_stashes_and_restores_dirty_worktree(self):
+        with mock.patch.object(
+            stacky_module, "run", side_effect=[" M file.txt", None, None, None, None, None]
+        ) as run_mock:
+            stacky_module.update_bottom_branch(
+                "upstream",
+                stacky_module.BranchName("main"),
+                stacky_module.BranchName("main"),
+                {stacky_module.BranchName("main"): "/wt/main"},
+            )
+
+        run_mock.assert_has_calls(
+            [
+                mock.call(
+                    stacky_module.CmdArgs(["git", "-C", "/wt/main", "status", "--porcelain", "--untracked-files=all"])
+                ),
+                mock.call(
+                    stacky_module.CmdArgs(
+                        [
+                            "git",
+                            "-C",
+                            "/wt/main",
+                            "stash",
+                            "push",
+                            "--include-untracked",
+                            "-m",
+                            "stacky update: main",
+                        ]
+                    )
+                ),
+                mock.call(
+                    stacky_module.CmdArgs(
+                        [
+                            "git",
+                            "-C",
+                            "/wt/main",
+                            "read-tree",
+                            "-u",
+                            "-m",
+                            "main",
+                            "refs/remotes/upstream/main",
+                        ]
+                    )
+                ),
+                mock.call(
+                    stacky_module.CmdArgs(["git", "update-ref", "refs/heads/main", "refs/remotes/upstream/main"])
+                ),
+                mock.call(stacky_module.CmdArgs(["git", "-C", "/wt/main", "stash", "apply", "--index", "stash@{0}"])),
+                mock.call(stacky_module.CmdArgs(["git", "-C", "/wt/main", "stash", "drop", "stash@{0}"])),
             ]
         )
 
@@ -947,6 +1002,9 @@ class TestWorktreeSupport(unittest.TestCase):
         run_mock.assert_has_calls(
             [
                 mock.call(stacky_module.CmdArgs(["git", "fetch", "upstream"])),
+                mock.call(
+                    stacky_module.CmdArgs(["git", "-C", "/wt/main", "status", "--porcelain", "--untracked-files=all"])
+                ),
                 mock.call(
                     stacky_module.CmdArgs(
                         [
