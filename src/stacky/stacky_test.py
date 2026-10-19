@@ -408,6 +408,136 @@ class TestWorktreeSupport(unittest.TestCase):
             os.unlink(path)
         self.assertEqual(cfg.remote_name, "upstream")
 
+    def test_read_one_config_stack_roots(self):
+        cfg = stacky_module.StackyConfig()
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write("[UI]\nstack_roots = main, dev/8.0 dev/7.4.3\n")
+            path = f.name
+        try:
+            cfg.read_one_config(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(
+            cfg.stack_roots,
+            frozenset(
+                {
+                    stacky_module.BranchName("main"),
+                    stacky_module.BranchName("dev/8.0"),
+                    stacky_module.BranchName("dev/7.4.3"),
+                }
+            ),
+        )
+
+    def test_configure_stack_roots_allows_independent_stacks(self):
+        roots = frozenset(
+            {
+                stacky_module.BranchName("main"),
+                stacky_module.BranchName("dev/8.0"),
+            }
+        )
+        parents = {
+            stacky_module.BranchName("main-feature"): stacky_module.BranchName("main"),
+            stacky_module.BranchName("release-feature"): stacky_module.BranchName("dev/8.0"),
+        }
+        previous_roots = stacky_module.STACK_BOTTOMS
+        stacky_module.configure_stack_roots(roots)
+        try:
+            stacky_module.CURRENT_BRANCH = stacky_module.BranchName("release-feature")
+            stack = stacky_module.StackBranchSet()
+            with (
+                mock.patch.object(
+                    stacky_module,
+                    "get_all_branches",
+                    return_value=[*roots, *parents],
+                ),
+                mock.patch.object(stacky_module, "get_stack_parent_branch", side_effect=parents.get),
+                mock.patch.object(
+                    stacky_module,
+                    "get_stack_parent_commit",
+                    side_effect=lambda branch: stacky_module.Commit(f"parent-{branch}") if branch in parents else None,
+                ),
+                mock.patch.object(
+                    stacky_module, "get_commit", side_effect=lambda branch: stacky_module.Commit(f"commit-{branch}")
+                ),
+                mock.patch.object(
+                    stacky_module,
+                    "get_remote_info",
+                    side_effect=lambda branch: ("origin", branch, stacky_module.Commit(f"remote-{branch}")),
+                ),
+            ):
+                stacky_module.load_all_stacks(stack)
+        finally:
+            stacky_module.configure_stack_roots(previous_roots)
+
+        self.assertEqual({bottom.name for bottom in stack.bottoms}, roots)
+        self.assertEqual(stack.stack[stacky_module.BranchName("main-feature")].parent.name, "main")
+        self.assertEqual(stack.stack[stacky_module.BranchName("release-feature")].parent.name, "dev/8.0")
+
+    def test_rebuild_stops_at_configured_release_root(self):
+        roots = frozenset(
+            {
+                stacky_module.BranchName("main"),
+                stacky_module.BranchName("dev/8.0"),
+            }
+        )
+        previous_roots = stacky_module.STACK_BOTTOMS
+        stacky_module.configure_stack_roots(roots)
+        try:
+            with (
+                mock.patch.object(
+                    stacky_module,
+                    "get_pr_info",
+                    return_value=SimpleNamespace(open={"baseRefName": "dev/8.0"}),
+                ) as get_pr_info_mock,
+                mock.patch.object(stacky_module, "get_config", return_value=stacky_module.StackyConfig()),
+                mock.patch.object(stacky_module, "get_merge_base", return_value="abc123"),
+                mock.patch.object(stacky_module, "set_parent") as set_parent_mock,
+                mock.patch.object(stacky_module, "set_parent_commit") as set_parent_commit_mock,
+                mock.patch.object(stacky_module, "run") as run_mock,
+            ):
+                stacky_module.cmd_rebuild(
+                    MagicMock(),
+                    Namespace(name=stacky_module.BranchName("release-feature")),
+                )
+        finally:
+            stacky_module.configure_stack_roots(previous_roots)
+
+        get_pr_info_mock.assert_called_once_with(stacky_module.BranchName("release-feature"))
+        run_mock.assert_has_calls(
+            [
+                mock.call(stacky_module.CmdArgs(["git", "checkout", "dev/8.0"])),
+                mock.call(
+                    stacky_module.CmdArgs(
+                        ["git", "branch", "-f", "--no-track", "release-feature", "origin/release-feature"]
+                    )
+                ),
+            ]
+        )
+        set_parent_mock.assert_called_once_with(
+            stacky_module.BranchName("release-feature"),
+            stacky_module.BranchName("dev/8.0"),
+            set_origin=True,
+        )
+        set_parent_commit_mock.assert_called_once_with(stacky_module.BranchName("release-feature"), "abc123")
+
+    def test_worktree_reset_uses_configured_release_root(self):
+        roots = frozenset(
+            {
+                stacky_module.BranchName("dev/8.0"),
+                stacky_module.BranchName("dev/7.4.3"),
+            }
+        )
+        previous_roots = stacky_module.STACK_BOTTOMS
+        stacky_module.configure_stack_roots(roots)
+        stacky_module.CURRENT_BRANCH = stacky_module.BranchName("feature")
+        try:
+            with mock.patch.object(stacky_module, "get_all_branches", return_value=[*roots]):
+                root = stacky_module._get_worktree_reset_branch()
+        finally:
+            stacky_module.configure_stack_roots(previous_roots)
+
+        self.assertEqual(root, stacky_module.BranchName("dev/7.4.3"))
+
     def test_read_one_config_git_commands(self):
         cfg = stacky_module.StackyConfig()
         with tempfile.NamedTemporaryFile("w", delete=False) as f:

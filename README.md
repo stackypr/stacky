@@ -44,8 +44,8 @@ When enabled, Stacky uses `gh auth git-credential` for GitHub HTTPS authenticati
 Syntax is as follows:
 - `stacky info`: show all stacks , add `-pr` if you want to see GitHub PR numbers (slows things down a bit)
 - `stacky branch`: per branch commands (shortcut: `stacky b`)
-    - `stacky branch up` (`stacky b u`): move down the stack (towards `master`)
-    - `stacky branch down` (`stacky b d`): move down the stack (towards `master`)
+    - `stacky branch up` (`stacky b u`): move up the stack (away from its root)
+    - `stacky branch down` (`stacky b d`): move down the stack (towards its root)
     - `stacky branch new <name>`: create a new branch on top of the current one
 - `stacky commit [-m <message>] [--amend] [--allow-empty]`: wrapper around `git commit` that syncs everything upstack
     - `stacky amend`: will amend currently tracked changes to top commit
@@ -55,7 +55,7 @@ Syntax is as follows:
     - `stacky stack push [--no-pr] [--checkout | --no-checkout]`: push to origin, optionally not creating PRs if they don’t exist; checkout behavior defaults to `checkout_before_push` in the config. `--checkout` checks out each branch before pushing and restores the original branch afterward; `--no-checkout` disables it for this command
 - `stacky upstack onto <target>`: restack the current branch (and everything upstack from it) on top of another branch (like `gt us onto`), useful if you’ve made a separate PR that you want to include in your stack
 - `stacky continue`: continue an interrupted stacky sync command (because of conflicts)
-- `stacky update`: will pull changes from github and update master, delete branches that have been merged into master, and remove their stack-parent state
+- `stacky update`: will pull changes from github and update every configured stack root, delete branches that have been merged into a root, and remove their stack-parent state
 - `stacky vacuum`: remove stale stack-parent state left behind for local branches that no longer exist
 - `stacky worktree gc [--max-spares N]`: remove extra spare pooled worktrees when using `use_worktree = true`
 - `stacky shell setup`: generate completion and wrapper scripts for your shell
@@ -186,12 +186,13 @@ List of parameters for each sections:
 
 ### UI
  * skip_confirm, boolean with a default value of `False`, set it to `True` to skip confirmation before doing things like reparenting or removing merged branches.
- * change_to_main: boolean with a default value of `False`, by default `stacky` will stop doing action is you are not in a valid stack (ie. a branch that was created or adopted by stacky), when set to `True` `stacky` will first change to `main` or `master` *when* the current branch is not a valid stack.
+ * change_to_main: boolean with a default value of `False`, by default `stacky` will stop doing action is you are not in a valid stack (ie. a branch that was created or adopted by stacky), when set to `True` `stacky` will first change to the configured stack root *when* the current branch is not a valid stack and exactly one configured root exists locally.
  * change_to_adopted: boolean with a default value of `False`, when set to `True` `stacky` will change the current branch to the adopted one.
  * share_ssh_session: boolean with a default value of `False`, when set to `True` `stacky` will create a shared `ssh` session to the `github.com` server. This is useful when you are pushing a stack of diff and you have some kind of 2FA on your ssh key like the ed25519-sk.
  * use_gh_auth: boolean with a default value of `False`, when set to `True` `stacky` uses your existing `gh` authentication for GitHub Git operations, including remotes configured with SSH URLs. This takes precedence over `share_ssh_session`.
  * remote_name: string with a default value of `origin`, sets the default git remote used by commands such as `push` and `update`. You can still override it per command with `--remote-name` / `-r`.
  * checkout_before_push: boolean with a default value of `False`, when set to `True` all push commands check out each branch before pushing and restore the original branch afterward. With `use_worktree = true`, pushes run in each branch's worktree instead. Override it per command with `--checkout` or `--no-checkout`.
+ * stack_roots: comma- or whitespace-separated branch names that may act as independent stack roots in this repository. The default is `main, master`. An explicit value replaces that default, so include every root the repository uses. For example: `stack_roots = main, dev/8.0, dev/7.4.3`.
  * git_command: string with a default value of `git`, sets the fallback command prefix Stacky uses for internal git operations. For example, `git_command = alternategit cache` makes Stacky run `alternategit cache status` instead of `git status`. You can also override this per invocation with `--git-command`.
  * use_worktree: boolean with a default value of `False`, when set to `True` branch checkout and branch creation use dedicated git worktrees.
  * worktree_root: string with a default value of `.stacky/worktrees`, controls where stacky stores managed worktrees.
