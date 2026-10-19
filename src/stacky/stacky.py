@@ -2095,7 +2095,7 @@ def delete_branches(stack: StackBranchSet, deletes: List[StackBranch]):
         delete_stack_parent_ref(b.name)
 
 
-def cmd_vacuum(stack: StackBranchSet, args):  # noqa: ARG001
+def cmd_vacuum(stack: Optional[StackBranchSet], args):  # noqa: ARG001
     stale_branches = vacuum_stack_parent_refs()
     if stale_branches:
         info("Removed {} stale stack-parent ref(s)", len(stale_branches))
@@ -2760,42 +2760,45 @@ def main():
         if args_need_gh(args):
             init_gh()
 
-        stack = StackBranchSet()
-        load_all_stacks(stack)
-
-        global CURRENT_BRANCH
-        if args.command == "continue":
-            try:
-                with open(STATE_FILE) as f:
-                    state = json.load(f)
-            except FileNotFoundError as e:  # noqa: F841
-                die("No previous command in progress")
-            branch = BranchName(state["branch"])
-            if not config.use_worktree:
-                run(CmdArgs(["git", "checkout", branch]))
-            CURRENT_BRANCH = branch
-            if CURRENT_BRANCH not in stack.stack:
-                die("Current branch {} is not in a stack", CURRENT_BRANCH)
-
-            sync_names = state["sync"]
-            syncs = [stack.stack[n] for n in sync_names]
-
-            inner_do_sync(syncs, sync_names)
+        if args.command == "vacuum":
+            args.func(None, args)
         else:
-            # TODO restore the current branch after changing the branch on some commands for
-            # instance `info`
-            if CURRENT_BRANCH not in stack.stack:
-                main_branch = get_real_stack_bottom()
+            stack = StackBranchSet()
+            load_all_stacks(stack)
 
-                if config.change_to_main and main_branch is not None:
-                    if not config.use_worktree:
-                        run(["git", "checkout", main_branch])
-                    CURRENT_BRANCH = main_branch
-                else:
+            global CURRENT_BRANCH
+            if args.command == "continue":
+                try:
+                    with open(STATE_FILE) as f:
+                        state = json.load(f)
+                except FileNotFoundError as e:  # noqa: F841
+                    die("No previous command in progress")
+                branch = BranchName(state["branch"])
+                if not config.use_worktree:
+                    run(CmdArgs(["git", "checkout", branch]))
+                CURRENT_BRANCH = branch
+                if CURRENT_BRANCH not in stack.stack:
                     die("Current branch {} is not in a stack", CURRENT_BRANCH)
 
-            get_current_stack_as_forest(stack)
-            args.func(stack, args)
+                sync_names = state["sync"]
+                syncs = [stack.stack[n] for n in sync_names]
+
+                inner_do_sync(syncs, sync_names)
+            else:
+                # TODO restore the current branch after changing the branch on some commands for
+                # instance `info`
+                if CURRENT_BRANCH not in stack.stack:
+                    main_branch = get_real_stack_bottom()
+
+                    if config.change_to_main and main_branch is not None:
+                        if not config.use_worktree:
+                            run(["git", "checkout", main_branch])
+                        CURRENT_BRANCH = main_branch
+                    else:
+                        die("Current branch {} is not in a stack", CURRENT_BRANCH)
+
+                get_current_stack_as_forest(stack)
+                args.func(stack, args)
 
         # Success, delete the state file
         try:

@@ -352,6 +352,23 @@ class TestPush(unittest.TestCase):
                 self.assertIn("--checkout", output.getvalue())
                 self.assertIn("--no-checkout", output.getvalue())
 
+    def test_vacuum_does_not_require_current_branch_to_be_in_a_stack(self):
+        cfg = stacky_module.StackyConfig()
+        with (
+            mock.patch.object(stacky_module.sys, "argv", ["stacky", "vacuum"]),
+            mock.patch.object(stacky_module, "read_config", return_value=cfg),
+            mock.patch.object(stacky_module, "CURRENT_BRANCH", stacky_module.BranchName("unadopted"), create=True),
+            mock.patch.object(stacky_module, "run_always_return", side_effect=["/repo", "/repo/.git"]),
+            mock.patch.object(stacky_module, "init_git"),
+            mock.patch.object(stacky_module, "load_all_stacks") as load_stacks_mock,
+            mock.patch.object(stacky_module, "vacuum_stack_parent_refs", return_value=[]) as vacuum_mock,
+            mock.patch.object(stacky_module.os, "remove"),
+        ):
+            stacky_module.main()
+
+        vacuum_mock.assert_called_once_with()
+        load_stacks_mock.assert_not_called()
+
 
 class TestWorktreeSupport(unittest.TestCase):
     def test_parse_worktree_list(self):
