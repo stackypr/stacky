@@ -190,8 +190,25 @@ List of parameters for each sections:
  * use_gh_auth: boolean with a default value of `False`, when set to `True` `stacky` uses your existing `gh` authentication for GitHub Git operations, including remotes configured with SSH URLs. This takes precedence over `share_ssh_session`.
  * remote_name: string with a default value of `origin`, sets the default git remote used by commands such as `push` and `update`. You can still override it per command with `--remote-name` / `-r`.
  * checkout_before_push: boolean with a default value of `False`, when set to `True` all push commands check out each branch before pushing and restore the original branch afterward. With `use_worktree = true`, pushes run in each branch's worktree instead. Override it per command with `--checkout` or `--no-checkout`.
+ * git_command: string with a default value of `git`, sets the fallback command prefix Stacky uses for internal git operations. For example, `git_command = alternategit cache` makes Stacky run `alternategit cache status` instead of `git status`. You can also override this per invocation with `--git-command`.
  * use_worktree: boolean with a default value of `False`, when set to `True` branch checkout and branch creation use dedicated git worktrees.
  * worktree_root: string with a default value of `.stacky/worktrees`, controls where stacky stores managed worktrees.
+
+### git_commands
+
+Use this section to override individual git subcommands. The replacement command is shell-split and Stacky appends the regular arguments for that git subcommand.
+
+```
+[git_commands]
+fetch = mygit fetch fromcache
+push = myothergit push params
+```
+
+With this config, `git fetch origin` becomes `mygit fetch fromcache origin`, and `git push -f origin branch:branch` becomes `myothergit push params -f origin branch:branch`. Per-subcommand overrides can also be provided per invocation with repeated `--git-command` flags:
+
+```
+stacky --git-command 'fetch=mygit fetch fromcache' --git-command 'push=myothergit push params' update
+```
 
 ## Shell wrapper for worktree auto-cd
 
