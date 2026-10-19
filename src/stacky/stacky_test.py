@@ -352,6 +352,23 @@ class TestPush(unittest.TestCase):
                 self.assertIn("--checkout", output.getvalue())
                 self.assertIn("--no-checkout", output.getvalue())
 
+    def test_vacuum_does_not_require_current_branch_to_be_in_a_stack(self):
+        cfg = stacky_module.StackyConfig()
+        with (
+            mock.patch.object(stacky_module.sys, "argv", ["stacky", "vacuum"]),
+            mock.patch.object(stacky_module, "read_config", return_value=cfg),
+            mock.patch.object(stacky_module, "CURRENT_BRANCH", stacky_module.BranchName("unadopted"), create=True),
+            mock.patch.object(stacky_module, "run_always_return", side_effect=["/repo", "/repo/.git"]),
+            mock.patch.object(stacky_module, "init_git"),
+            mock.patch.object(stacky_module, "load_all_stacks") as load_stacks_mock,
+            mock.patch.object(stacky_module, "vacuum_stack_parent_refs", return_value=[]) as vacuum_mock,
+            mock.patch.object(stacky_module.os, "remove"),
+        ):
+            stacky_module.main()
+
+        vacuum_mock.assert_called_once_with()
+        load_stacks_mock.assert_not_called()
+
 
 class TestWorktreeSupport(unittest.TestCase):
     def test_parse_worktree_list(self):
@@ -724,9 +741,59 @@ class TestWorktreeSupport(unittest.TestCase):
                 mock.call(stacky_module.CmdArgs(["git", "-C", "/wt/main", "checkout", "main"])),
                 mock.call(stacky_module.CmdArgs(["git", "checkout", "--detach"])),
                 mock.call(stacky_module.CmdArgs(["git", "branch", "-D", "feature"])),
+                mock.call(stacky_module.CmdArgs(["git", "update-ref", "-d", "refs/stack-parent/feature"])),
             ]
         )
         self.assertEqual(stacky_module.CURRENT_BRANCH, stacky_module.BranchName("main"))
+
+    def test_vacuum_stack_parent_refs_removes_only_refs_without_local_branches(self):
+        with (
+            mock.patch.object(
+                stacky_module,
+                "get_all_branches",
+                return_value=[stacky_module.BranchName("main"), stacky_module.BranchName("feature")],
+            ),
+            mock.patch.object(
+                stacky_module,
+                "get_stack_parent_branches",
+                return_value=[
+                    stacky_module.BranchName("feature"),
+                    stacky_module.BranchName("merged/topic"),
+                ],
+            ),
+            mock.patch.object(stacky_module, "delete_stack_parent_refs") as delete_refs_mock,
+        ):
+            stale = stacky_module.vacuum_stack_parent_refs()
+
+        self.assertEqual(stale, [stacky_module.BranchName("merged/topic")])
+        delete_refs_mock.assert_called_once_with([stacky_module.BranchName("merged/topic")])
+
+    def test_delete_stack_parent_refs_uses_single_transaction(self):
+        with mock.patch.object(stacky_module, "run_multiline") as run_mock:
+            stacky_module.delete_stack_parent_refs(
+                [stacky_module.BranchName("merged-one"), stacky_module.BranchName("team/merged-two")]
+            )
+
+        run_mock.assert_called_once_with(
+            stacky_module.CmdArgs(["git", "update-ref", "--stdin"]),
+            input_text=("delete refs/stack-parent/merged-one\n" "delete refs/stack-parent/team/merged-two\n"),
+        )
+
+    def test_get_stack_parent_branches_preserves_nested_branch_names(self):
+        with mock.patch.object(
+            stacky_module,
+            "run_multiline",
+            return_value="refs/stack-parent/feature\nrefs/stack-parent/team/topic\n",
+        ) as run_mock:
+            branches = stacky_module.get_stack_parent_branches()
+
+        self.assertEqual(
+            branches,
+            [stacky_module.BranchName("feature"), stacky_module.BranchName("team/topic")],
+        )
+        run_mock.assert_called_once_with(
+            stacky_module.CmdArgs(["git", "for-each-ref", "--format", "%(refname)", "refs/stack-parent/"])
+        )
 
     def test_cmd_worktree_gc_removes_excess_spares(self):
         cfg = stacky_module.StackyConfig(use_worktree=True, worktree_root=".stacky/worktrees")

@@ -55,7 +55,8 @@ Syntax is as follows:
     - `stacky stack push [--no-pr] [--checkout | --no-checkout]`: push to origin, optionally not creating PRs if they don’t exist; checkout behavior defaults to `checkout_before_push` in the config. `--checkout` checks out each branch before pushing and restores the original branch afterward; `--no-checkout` disables it for this command
 - `stacky upstack onto <target>`: restack the current branch (and everything upstack from it) on top of another branch (like `gt us onto`), useful if you’ve made a separate PR that you want to include in your stack
 - `stacky continue`: continue an interrupted stacky sync command (because of conflicts)
-- `stacky update`: will pull changes from github and update master, and deletes branches that have been merged into master
+- `stacky update`: will pull changes from github and update master, delete branches that have been merged into master, and remove their stack-parent state
+- `stacky vacuum`: remove stale stack-parent state left behind for local branches that no longer exist
 - `stacky worktree gc [--max-spares N]`: remove extra spare pooled worktrees when using `use_worktree = true`
 - `stacky shell setup`: generate completion and wrapper scripts for your shell
 
@@ -67,12 +68,12 @@ The indicators (`*`, `~`, `!`) mean:
 ```
 $ stacky --help
 usage: stacky [-h] [--color {always,auto,never}]
-              {continue,info,commit,amend,branch,b,stack,s,upstack,us,downstack,ds,update,worktree,shell,import,adopt,land,push,sync,checkout,co,sco} ...
+              {continue,info,commit,amend,branch,b,stack,s,upstack,us,downstack,ds,update,vacuum,worktree,shell,import,adopt,land,push,sync,checkout,co,sco} ...
 
 Handle git stacks
 
 positional arguments:
-  {continue,info,commit,amend,branch,b,stack,s,upstack,us,downstack,ds,update,worktree,shell,import,adopt,land,push,sync,checkout,co,sco}
+  {continue,info,commit,amend,branch,b,stack,s,upstack,us,downstack,ds,update,vacuum,worktree,shell,import,adopt,land,push,sync,checkout,co,sco}
     continue            Continue previously interrupted command
     info                Stack info
     commit              Commit
@@ -82,6 +83,7 @@ positional arguments:
     upstack (us)        Operations on the current upstack
     downstack (ds)      Operations on the current downstack
     update              Update repo
+    vacuum              Remove stale Stacky state
     worktree            Manage stacky worktree pool
     shell               Generate shell integration scripts
     adopt               Adopt one branch
