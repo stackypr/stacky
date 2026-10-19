@@ -934,7 +934,17 @@ def load_stack_for_given_branch(
     Return also a list of BranchName of all the branch bellow the specified one
     """
     branches: List[BranchNCommit] = []
+    branch_positions: Dict[BranchName, int] = {}
     while branch not in STACK_BOTTOMS:
+        if branch in branch_positions:
+            cycle_start = branch_positions[branch]
+            cycle = [b.branch for b in branches[cycle_start:]] + [branch]
+            traversed_branches = [b.branch for b in branches] + [branch]
+            if check:
+                die("Cycle detected in stack: {}", " -> ".join(cycle))
+            return None, traversed_branches
+
+        branch_positions[branch] = len(branches)
         parent = get_stack_parent_branch(branch)
         parent_commit = get_stack_parent_commit(branch)
         if parent is None and parent_commit is not None:
@@ -974,6 +984,14 @@ def load_all_stacks(stack: StackBranchSet) -> Optional[StackBranch]:
         top, branches = load_stack_for_given_branch(stack, b, check=False)
         all_branches -= set(branches)
         if top is None:
+            cycle = find_branch_cycle(branches)
+            if cycle is not None:
+                message = "Cycle detected in stack: {}"
+                cycle_path = " -> ".join(cycle)
+                if CURRENT_BRANCH in branches:
+                    die(message, cycle_path)
+                warning(message, cycle_path)
+                continue
             if len(branches) > 1:
                 # Incomplete (broken) stack
                 warning("Broken stack: {}", " -> ".join(branches))
@@ -981,6 +999,15 @@ def load_all_stacks(stack: StackBranchSet) -> Optional[StackBranch]:
         if b == CURRENT_BRANCH:
             current_branch_top = top
     return current_branch_top
+
+
+def find_branch_cycle(branches: List[BranchName]) -> Optional[List[BranchName]]:
+    branch_positions: Dict[BranchName, int] = {}
+    for position, branch in enumerate(branches):
+        if branch in branch_positions:
+            return branches[branch_positions[branch] : position + 1]
+        branch_positions[branch] = position
+    return None
 
 
 def make_tree_node(b: StackBranch) -> TreeNode:

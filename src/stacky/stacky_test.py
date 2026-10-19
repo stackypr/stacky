@@ -710,6 +710,79 @@ class TestWorktreeSupport(unittest.TestCase):
             set_origin=True,
         )
 
+    def test_load_stack_for_given_branch_rejects_self_cycle(self):
+        branch = stacky_module.BranchName("feature")
+        with (
+            mock.patch.object(stacky_module, "get_stack_parent_branch", return_value=branch),
+            mock.patch.object(stacky_module, "get_stack_parent_commit", return_value=stacky_module.Commit("abc123")),
+            mock.patch.object(stacky_module, "stop_muxed_ssh"),
+            self.assertRaisesRegex(stacky_module.ExitException, "Cycle detected in stack: feature -> feature"),
+        ):
+            stacky_module.load_stack_for_given_branch(MagicMock(), branch, check=True)
+
+    def test_load_stack_for_given_branch_returns_multi_branch_cycle(self):
+        parents = {
+            stacky_module.BranchName("one"): stacky_module.BranchName("two"),
+            stacky_module.BranchName("two"): stacky_module.BranchName("three"),
+            stacky_module.BranchName("three"): stacky_module.BranchName("two"),
+        }
+        with (
+            mock.patch.object(stacky_module, "get_stack_parent_branch", side_effect=parents.get),
+            mock.patch.object(stacky_module, "get_stack_parent_commit", return_value=stacky_module.Commit("abc123")),
+        ):
+            top, branches = stacky_module.load_stack_for_given_branch(
+                MagicMock(), stacky_module.BranchName("one"), check=False
+            )
+
+        self.assertIsNone(top)
+        self.assertEqual(
+            branches,
+            [
+                stacky_module.BranchName("one"),
+                stacky_module.BranchName("two"),
+                stacky_module.BranchName("three"),
+                stacky_module.BranchName("two"),
+            ],
+        )
+
+    def test_load_all_stacks_skips_unrelated_cycle(self):
+        stacky_module.CURRENT_BRANCH = stacky_module.BranchName("main")
+        stack = stacky_module.StackBranchSet()
+        parents = {stacky_module.BranchName("bad"): stacky_module.BranchName("bad")}
+        with (
+            mock.patch.object(
+                stacky_module,
+                "get_all_branches",
+                return_value=[stacky_module.BranchName("main"), stacky_module.BranchName("bad")],
+            ),
+            mock.patch.object(stacky_module, "get_stack_parent_branch", side_effect=parents.get),
+            mock.patch.object(stacky_module, "get_stack_parent_commit", return_value=stacky_module.Commit("abc123")),
+            mock.patch.object(stacky_module, "get_commit", return_value=stacky_module.Commit("def456")),
+            mock.patch.object(
+                stacky_module,
+                "get_remote_info",
+                return_value=("origin", stacky_module.BranchName("main"), stacky_module.Commit("def456")),
+            ),
+            mock.patch.object(stacky_module, "warning") as warning_mock,
+        ):
+            stacky_module.load_all_stacks(stack)
+
+        self.assertIn(stacky_module.BranchName("main"), stack.stack)
+        self.assertNotIn(stacky_module.BranchName("bad"), stack.stack)
+        warning_mock.assert_called_once_with("Cycle detected in stack: {}", "bad -> bad")
+
+    def test_load_all_stacks_rejects_cycle_containing_current_branch(self):
+        branch = stacky_module.BranchName("bad")
+        stacky_module.CURRENT_BRANCH = branch
+        with (
+            mock.patch.object(stacky_module, "get_all_branches", return_value=[branch]),
+            mock.patch.object(stacky_module, "get_stack_parent_branch", return_value=branch),
+            mock.patch.object(stacky_module, "get_stack_parent_commit", return_value=stacky_module.Commit("abc123")),
+            mock.patch.object(stacky_module, "stop_muxed_ssh"),
+            self.assertRaisesRegex(stacky_module.ExitException, "Cycle detected in stack: bad -> bad"),
+        ):
+            stacky_module.load_all_stacks(stacky_module.StackBranchSet())
+
     def test_delete_branches_current_branch_worktree_detaches_and_emits_location(self):
         cfg = stacky_module.StackyConfig(use_worktree=True)
         stacky_module.CURRENT_BRANCH = stacky_module.BranchName("feature")
