@@ -15,8 +15,8 @@
 # to the commit at the tip of the parent branch, as `git update-ref
 # refs/stack-parent/<name>`.
 #
-# When rebasing or restacking, we proceed in depth-first order (from "master"
-# onwards). After updating a parent branch P, given a child branch C,
+# When rebasing or restacking, we proceed in depth-first order (from each stack
+# root onwards). After updating a parent branch P, given a child branch C,
 # we rebase everything from C's PC until C's tip onto P.
 #
 # That's all there is to it.
@@ -108,7 +108,8 @@ COLOR_STDERR: bool = os.isatty(2)
 # by shell wrappers (for auto-cd) while still being fully interactive.
 IS_TERMINAL: bool = os.isatty(0) and os.isatty(2)
 CURRENT_BRANCH: BranchName
-STACK_BOTTOMS: FrozenSet[BranchName] = frozenset([BranchName("master"), BranchName("main")])
+DEFAULT_STACK_ROOTS: FrozenSet[BranchName] = frozenset([BranchName("master"), BranchName("main")])
+STACK_BOTTOMS: FrozenSet[BranchName] = DEFAULT_STACK_ROOTS
 STACK_PARENT_REF_PREFIX = "refs/stack-parent/"
 TOP_LEVEL_DIR: str
 REPO_TOP_LEVEL_DIR: str
@@ -171,6 +172,7 @@ class StackyConfig:
     use_worktree: bool = False
     worktree_root: Optional[str] = None
     checkout_before_push: bool = False
+    stack_roots: FrozenSet[BranchName] = DEFAULT_STACK_ROOTS
 
     def read_one_config(self, config_path: str):
         rawconfig = configparser.ConfigParser()
@@ -188,6 +190,12 @@ class StackyConfig:
             self.checkout_before_push = rawconfig.getboolean(
                 "UI", "checkout_before_push", fallback=self.checkout_before_push
             )
+            configured_roots = rawconfig.get("UI", "stack_roots", fallback=None)
+            if configured_roots is not None:
+                roots = frozenset(BranchName(root) for root in re.split(r"[\s,]+", configured_roots.strip()) if root)
+                if not roots:
+                    raise ValueError("UI.stack_roots must contain at least one branch name")
+                self.stack_roots = roots
         if rawconfig.has_section("git_commands"):
             for command, replacement in rawconfig.items("git_commands"):
                 self.git_commands[command] = replacement
@@ -203,6 +211,11 @@ def get_config() -> StackyConfig:
     if CONFIG is None:
         CONFIG = read_config()
     return CONFIG
+
+
+def configure_stack_roots(roots: FrozenSet[BranchName]):
+    global STACK_BOTTOMS
+    STACK_BOTTOMS = roots
 
 
 def read_config() -> StackyConfig:
@@ -675,18 +688,15 @@ def get_all_branches() -> List[BranchName]:
     return [BranchName(b) for b in branches.split("\n") if b]
 
 
-def get_real_stack_bottom() -> Optional[BranchName]:  # type: ignore [return]
-    """
-    return the actual stack bottom for this current repo
-    """
-    branches = get_all_branches()
-    candiates = set()
-    for b in branches:
-        if b in STACK_BOTTOMS:
-            candiates.add(b)
+def get_existing_stack_roots() -> List[BranchName]:
+    branches = set(get_all_branches())
+    return sorted(root for root in STACK_BOTTOMS if root in branches)
 
-    if len(candiates) == 1:
-        return candiates.pop()
+
+def get_real_stack_bottom() -> Optional[BranchName]:
+    """Return the configured stack root when exactly one exists locally."""
+    roots = get_existing_stack_roots()
+    return roots[0] if len(roots) == 1 else None
 
 
 def get_stack_parent_branch(branch: BranchName) -> Optional[BranchName]:  # type: ignore [return]
@@ -1287,15 +1297,12 @@ def _find_spare_worktree_path(root: str, entries: List[WorktreeEntry]) -> Option
 
 
 def _get_worktree_reset_branch() -> BranchName:
-    main_branch = get_real_stack_bottom()
-    if main_branch is not None:
-        return main_branch
-    for candidate in ["main", "master"]:
-        ref = f"refs/heads/{candidate}"
-        if run(CmdArgs(["git", "rev-parse", "--verify", ref]), check=False) is not None:
-            return BranchName(candidate)
-    die("Cannot find main/master branch for worktree reset")
-    return BranchName("main")
+    roots = get_existing_stack_roots()
+    if not roots:
+        die("Cannot find a configured stack root for worktree reset")
+    if CURRENT_BRANCH in roots:
+        return CURRENT_BRANCH
+    return roots[0]
 
 
 def _recycle_worktree_path(path: str):
@@ -2222,16 +2229,16 @@ def cmd_update(stack: StackBranchSet, args):
     run(CmdArgs(["git", "fetch", remote]))
 
     # TODO(tudor): We should rebase instead of silently dropping
-    # everything you have on local master. Oh well.
+    # everything you have on local root branches. Oh well.
     global CURRENT_BRANCH
     config = get_config()
     worktree_map = get_worktree_map() if config.use_worktree else {}
     for b in stack.bottoms:
         update_bottom_branch(remote, b.name, b.remote_branch, worktree_map)
 
-    # We treat origin as the source of truth for bottom branches (master), and
+    # We treat origin as the source of truth for root branches, and
     # the local repo as the source of truth for everything else. So we can only
-    # track PR closure for branches that are direct descendants of master.
+    # track PR closure for branches that are direct descendants of a root.
 
     info("Checking if any PRs have been merged and can be deleted")
     forest = get_bottom_level_branches_as_forest(stack)
@@ -2313,8 +2320,8 @@ def get_merge_base(b1: BranchName, b2: BranchName):
 def cmd_adopt(stack: StackBranch, args):
     """
     Adopt a branch that is based on the current branch (which must be a
-    valid stack bottom or the stack bottom (master or main) will be used
-    if change_to_main option is set in the config file
+    valid stack root or the sole existing root will be used if the
+    change_to_main option is set in the config file
     """
     config = get_config()
     branch = args.name
@@ -2345,11 +2352,8 @@ def cmd_rebuild(stack: StackBranch, args):
     branch = args.name
     global CURRENT_BRANCH
 
-    main_branch = get_real_stack_bottom()
-    assert main_branch is not None
-
     target_stack: list[BranchName] = []
-    while branch != main_branch:
+    while branch not in STACK_BOTTOMS:
         target_stack.append(branch)
         cout(f"Getting PR info for branch {branch}\n", fg="green")
         pr_info = get_pr_info(branch).open
@@ -2357,12 +2361,14 @@ def cmd_rebuild(stack: StackBranch, args):
             die(f"Branch {branch} has no open PR")
         branch = BranchName(pr_info["baseRefName"])
 
+    root_branch = branch
+
     target_stack.reverse()
 
-    cout(f"Switching to {main_branch}\n", fg="green")
-    run(CmdArgs(["git", "checkout", str(main_branch)]))
+    cout(f"Switching to {root_branch}\n", fg="green")
+    run(CmdArgs(["git", "checkout", str(root_branch)]))
 
-    prev = main_branch
+    prev = root_branch
     remote = "origin"
     for branch in target_stack:
         cout(f"Creating branch {branch}\n", fg="green")
@@ -2491,10 +2497,10 @@ def main():
         continue_parser.set_defaults(func=None)
 
         # down
-        down_parser = subparsers.add_parser("down", help="Go down in the current stack (towards master/main)")
+        down_parser = subparsers.add_parser("down", help="Go down in the current stack (towards its root)")
         down_parser.set_defaults(func=cmd_branch_down)
         # up
-        up_parser = subparsers.add_parser("up", help="Go up in the current stack (away master/main)")
+        up_parser = subparsers.add_parser("up", help="Go up in the current stack (away from its root)")
         up_parser.set_defaults(func=cmd_branch_up)
         # info
         info_parser = subparsers.add_parser("info", help="Stack info")
@@ -2768,6 +2774,7 @@ def main():
         global CONFIG
         CONFIG = read_config()
         config = get_config()
+        configure_stack_roots(config.stack_roots)
         git_commands = dict(config.git_commands)
         git_commands.update(cli_git_commands)
         configure_git_commands(cli_git_command if cli_git_command is not None else config.git_command, git_commands)
